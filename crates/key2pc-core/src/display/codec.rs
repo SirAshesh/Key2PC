@@ -206,6 +206,7 @@ pub struct MfH264Encoder {
     transform: IMFTransform,
     event_gen: Option<IMFMediaEventGenerator>,
     provides_samples: bool,
+    output_buf_size: u32,
     width: u32,
     height: u32,
     frame_duration_100ns: i64,
@@ -236,7 +237,7 @@ impl MfH264Encoder {
         let mut last_err = String::from("No H.264 encoder MFT available");
         for activate in candidates {
             match Self::try_init_candidate(activate, width, height, fps, bitrate_bps) {
-                Ok((transform, is_async, provides_samples)) => {
+                Ok((transform, is_async, provides_samples, output_buf_size)) => {
                     let event_gen = if is_async {
                         transform.cast::<IMFMediaEventGenerator>().ok()
                     } else {
@@ -246,6 +247,7 @@ impl MfH264Encoder {
                         transform,
                         event_gen,
                         provides_samples,
+                        output_buf_size,
                         width,
                         height,
                         frame_duration_100ns: (10_000_000 / i64::from(fps)).max(1),
@@ -268,7 +270,7 @@ impl MfH264Encoder {
         height: u32,
         fps: u32,
         bitrate_bps: u32,
-    ) -> Result<(IMFTransform, bool, bool)> {
+    ) -> Result<(IMFTransform, bool, bool, u32)> {
         let transform: IMFTransform = unsafe { activate.ActivateObject() }
             .map_err(|err| Key2PcError::Display(format!("ActivateObject failed: {err}")))?;
         let is_async = unlock_async_if_needed(&transform);
@@ -310,7 +312,8 @@ impl MfH264Encoder {
 
         let out_info = unsafe { transform.GetOutputStreamInfo(0)? };
         let provides_samples = (out_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
-        Ok((transform, is_async, provides_samples))
+        let output_buf_size = out_info.cbSize.max(width * height * 2).max(262_144);
+        Ok((transform, is_async, provides_samples, output_buf_size))
     }
 
     fn apply_force_keyframe(&self) {
@@ -348,7 +351,7 @@ impl VideoEncoder for MfH264Encoder {
             self.apply_force_keyframe();
         }
         let sample = create_sample_from_bytes(nv12_data, pts_100ns, self.frame_duration_100ns)?;
-        let alloc_size = (self.width * self.height).max(262_144);
+        let alloc_size = self.output_buf_size;
         let mut out_frames = Vec::new();
 
         if let Some(event_gen) = self.event_gen.clone() {
@@ -402,6 +405,7 @@ pub struct MfH264Decoder {
     transform: IMFTransform,
     event_gen: Option<IMFMediaEventGenerator>,
     provides_samples: bool,
+    output_buf_size: u32,
     width: u32,
     height: u32,
     coded_height: u32,
@@ -431,11 +435,12 @@ impl MfH264Decoder {
         let mut last_err = String::from("No H.264 decoder MFT available");
         for activate in candidates {
             match Self::try_init_candidate(activate, width, height) {
-                Ok(decoder_parts) => {
+                Ok((transform, event_gen, provides_samples, output_buf_size)) => {
                     let mut dec = Self {
-                        transform: decoder_parts.0,
-                        event_gen: decoder_parts.1,
-                        provides_samples: decoder_parts.2,
+                        transform,
+                        event_gen,
+                        provides_samples,
+                        output_buf_size,
                         width,
                         height,
                         coded_height: height,
@@ -458,7 +463,7 @@ impl MfH264Decoder {
         activate: IMFActivate,
         width: u32,
         height: u32,
-    ) -> Result<(IMFTransform, Option<IMFMediaEventGenerator>, bool)> {
+    ) -> Result<(IMFTransform, Option<IMFMediaEventGenerator>, bool, u32)> {
         let transform: IMFTransform = unsafe { activate.ActivateObject() }
             .map_err(|err| Key2PcError::Display(format!("Decoder ActivateObject failed: {err}")))?;
         let is_async = unlock_async_if_needed(&transform);
@@ -476,12 +481,16 @@ impl MfH264Decoder {
 
         let out_info = unsafe { transform.GetOutputStreamInfo(0)? };
         let provides_samples = (out_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
+        let output_buf_size = out_info
+            .cbSize
+            .max(width.max(1920) * height.max(1088) * 2)
+            .max(4_194_304);
         let event_gen = if is_async {
             transform.cast::<IMFMediaEventGenerator>().ok()
         } else {
             None
         };
-        Ok((transform, event_gen, provides_samples))
+        Ok((transform, event_gen, provides_samples, output_buf_size))
     }
 
     fn select_nv12_output_type(transform: &IMFTransform) -> Result<()> {
@@ -524,6 +533,9 @@ impl MfH264Decoder {
             if signed_stride >= self.width as usize {
                 self.stride = signed_stride;
             }
+        }
+        if let Ok(info) = unsafe { self.transform.GetOutputStreamInfo(0) } {
+            self.output_buf_size = self.output_buf_size.max(info.cbSize);
         }
     }
 
@@ -582,7 +594,7 @@ impl MfH264Decoder {
 impl VideoDecoder for MfH264Decoder {
     fn decode_annex_b(&mut self, data: &[u8], pts_100ns: i64) -> Result<Vec<DecodedFrame>> {
         let sample = create_sample_from_bytes(data, pts_100ns, 166_666)?;
-        let alloc_size = (self.width.max(1920) * self.height.max(1088) * 2).max(4_194_304);
+        let alloc_size = self.output_buf_size;
 
         if let Some(event_gen) = self.event_gen.clone() {
             let mut frames = Vec::new();

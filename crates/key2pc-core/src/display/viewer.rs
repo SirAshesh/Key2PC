@@ -181,8 +181,8 @@ struct D3dRenderer {
     hwnd: HWND,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    video_device: ID3D11VideoDevice,
-    video_context: ID3D11VideoContext,
+    video_device: Option<ID3D11VideoDevice>,
+    video_context: Option<ID3D11VideoContext>,
     swap_chain: IDXGISwapChain1,
     allow_tearing: bool,
     backbuffer_rtv: Option<ID3D11RenderTargetView>,
@@ -192,6 +192,7 @@ struct D3dRenderer {
     nv12_staging: Option<ID3D11Texture2D>,
     nv12_gpu: Option<ID3D11Texture2D>,
     input_view: Option<ID3D11VideoProcessorInputView>,
+    bgra_fallback_staging: Option<ID3D11Texture2D>,
     src_width: u32,
     src_height: u32,
     win_width: u32,
@@ -201,48 +202,9 @@ struct D3dRenderer {
 
 impl D3dRenderer {
     fn new(hwnd: HWND, win_width: u32, win_height: u32) -> Result<Self> {
-        let mut device: Option<ID3D11Device> = None;
-        let mut context: Option<ID3D11DeviceContext> = None;
-        let hw_res = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if hw_res.is_err() {
-            unsafe {
-                D3D11CreateDevice(
-                    None,
-                    D3D_DRIVER_TYPE_WARP,
-                    Default::default(),
-                    D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-                    None,
-                    D3D11_SDK_VERSION,
-                    Some(&mut device),
-                    None,
-                    Some(&mut context),
-                )
-            }
-            .map_err(|err| {
-                Key2PcError::Display(format!("Viewer D3D11CreateDevice failed: {err}"))
-            })?;
-        }
-
-        let device = device.unwrap();
-        let context = context.unwrap();
-        let video_device: ID3D11VideoDevice = device
-            .cast()
-            .map_err(|err| Key2PcError::Display(format!("Viewer ID3D11VideoDevice failed: {err}")))?;
-        let video_context: ID3D11VideoContext = context
-            .cast()
-            .map_err(|err| Key2PcError::Display(format!("Viewer ID3D11VideoContext failed: {err}")))?;
+        let (device, context) = create_viewer_d3d11_device()?;
+        let video_device = device.cast::<ID3D11VideoDevice>().ok();
+        let video_context = context.cast::<ID3D11VideoContext>().ok();
 
         let dxgi_device: IDXGIDevice = device
             .cast()
@@ -310,6 +272,7 @@ impl D3dRenderer {
             nv12_staging: None,
             nv12_gpu: None,
             input_view: None,
+            bgra_fallback_staging: None,
             src_width: 0,
             src_height: 0,
             win_width: win_width.max(1),
@@ -333,6 +296,7 @@ impl D3dRenderer {
         self.win_height = height;
         self.backbuffer_rtv = None;
         self.output_view = None;
+        self.bgra_fallback_staging = None;
 
         let flags = if self.allow_tearing {
             DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
@@ -361,62 +325,70 @@ impl D3dRenderer {
             self.rebuild_processor(frame.width, frame.height)?;
         }
 
-        let staging = self.nv12_staging.as_ref().unwrap();
-        let gpu_tex = self.nv12_gpu.as_ref().unwrap();
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        unsafe {
-            self.context
-                .Map(staging, 0, D3D11_MAP_WRITE, 0, Some(&mut mapped))
-        }
-        .map_err(|err| Key2PcError::Display(format!("Viewer Map staging failed: {err}")))?;
-
-        let w = frame.width as usize;
-        let h = frame.height as usize;
-        let pitch = mapped.RowPitch as usize;
-        let dst = unsafe { slice::from_raw_parts_mut(mapped.pData.cast::<u8>(), pitch * (h + h / 2)) };
-
-        for row in 0..h {
-            let src_off = row * w;
-            let dst_off = row * pitch;
-            if src_off + w <= frame.nv12_data.len() {
-                dst[dst_off..dst_off + w].copy_from_slice(&frame.nv12_data[src_off..src_off + w]);
-            }
-        }
-        let uv_src_base = h * w;
-        let uv_dst_base = h * pitch;
-        for row in 0..(h / 2) {
-            let src_off = uv_src_base + row * w;
-            let dst_off = uv_dst_base + row * pitch;
-            if src_off + w <= frame.nv12_data.len() {
-                dst[dst_off..dst_off + w].copy_from_slice(&frame.nv12_data[src_off..src_off + w]);
-            }
-        }
-
-        unsafe {
-            self.context.Unmap(staging, 0);
-            self.context.CopyResource(gpu_tex, staging);
-        }
-
-        if let Some(rtv) = &self.backbuffer_rtv {
-            let black = [0.0f32, 0.0, 0.0, 1.0];
+        if let (Some(video_context), Some(processor), Some(out_view), Some(in_view)) = (
+            &self.video_context,
+            &self.processor,
+            &self.output_view,
+            &self.input_view,
+        ) {
+            let staging = self.nv12_staging.as_ref().unwrap();
+            let gpu_tex = self.nv12_gpu.as_ref().unwrap();
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             unsafe {
-                self.context.ClearRenderTargetView(rtv, &black);
+                self.context
+                    .Map(staging, 0, D3D11_MAP_WRITE, 0, Some(&mut mapped))
             }
-        }
+            .map_err(|err| Key2PcError::Display(format!("Viewer Map staging failed: {err}")))?;
 
-        if let (Some(processor), Some(out_view), Some(in_view)) =
-            (&self.processor, &self.output_view, &self.input_view)
-        {
+            let w = frame.width as usize;
+            let h = frame.height as usize;
+            let pitch = mapped.RowPitch as usize;
+            let dst = unsafe {
+                slice::from_raw_parts_mut(mapped.pData.cast::<u8>(), pitch * (h + h / 2))
+            };
+
+            for row in 0..h {
+                let src_off = row * w;
+                let dst_off = row * pitch;
+                if src_off + w <= frame.nv12_data.len() {
+                    dst[dst_off..dst_off + w]
+                        .copy_from_slice(&frame.nv12_data[src_off..src_off + w]);
+                }
+            }
+            let uv_src_base = h * w;
+            let uv_dst_base = h * pitch;
+            for row in 0..(h / 2) {
+                let src_off = uv_src_base + row * w;
+                let dst_off = uv_dst_base + row * pitch;
+                if src_off + w <= frame.nv12_data.len() {
+                    dst[dst_off..dst_off + w]
+                        .copy_from_slice(&frame.nv12_data[src_off..src_off + w]);
+                }
+            }
+
+            unsafe {
+                self.context.Unmap(staging, 0);
+                self.context.CopyResource(gpu_tex, staging);
+            }
+
+            if let Some(rtv) = &self.backbuffer_rtv {
+                let black = [0.0f32, 0.0, 0.0, 1.0];
+                unsafe {
+                    self.context.ClearRenderTargetView(rtv, &black);
+                }
+            }
+
             let stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: true.into(),
                 pInputSurface: ManuallyDrop::new(Some(in_view.clone())),
                 ..Default::default()
             };
-            unsafe {
-                self.video_context
-                    .VideoProcessorBlt(processor, out_view, 0, &[stream])
-            }
-            .map_err(|err| Key2PcError::Display(format!("Viewer VideoProcessorBlt failed: {err}")))?;
+            unsafe { video_context.VideoProcessorBlt(processor, out_view, 0, &[stream]) }
+                .map_err(|err| {
+                    Key2PcError::Display(format!("Viewer VideoProcessorBlt failed: {err}"))
+                })?;
+        } else {
+            self.render_nv12_software_fallback(frame)?;
         }
 
         let present_flags = if self.allow_tearing {
@@ -429,6 +401,63 @@ impl D3dRenderer {
         Ok(())
     }
 
+    fn render_nv12_software_fallback(&mut self, frame: &DecodedFrame) -> Result<()> {
+        if self.bgra_fallback_staging.is_none() {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: self.win_width.max(1),
+                Height: self.win_height.max(1),
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut tex: Option<ID3D11Texture2D> = None;
+            unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut tex)) }
+                .map_err(|err| Key2PcError::Display(format!("Fallback texture failed: {err}")))?;
+            self.bgra_fallback_staging = tex;
+        }
+
+        let staging = self.bgra_fallback_staging.as_ref().unwrap();
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            self.context
+                .Map(staging, 0, D3D11_MAP_WRITE, 0, Some(&mut mapped))
+        }
+        .map_err(|err| Key2PcError::Display(format!("Fallback Map failed: {err}")))?;
+
+        let dst_w = self.win_width as usize;
+        let dst_h = self.win_height as usize;
+        let pitch = mapped.RowPitch as usize;
+        let dst = unsafe { slice::from_raw_parts_mut(mapped.pData.cast::<u8>(), pitch * dst_h) };
+        nv12_to_bgra_scaled(
+            &frame.nv12_data,
+            frame.width as usize,
+            frame.height as usize,
+            dst,
+            dst_w,
+            dst_h,
+            pitch,
+            self.dest_rect,
+        );
+
+        unsafe {
+            self.context.Unmap(staging, 0);
+        }
+        if let Ok(backbuffer) = unsafe { self.swap_chain.GetBuffer::<ID3D11Texture2D>(0) } {
+            unsafe {
+                self.context.CopyResource(&backbuffer, staging);
+            }
+        }
+        Ok(())
+    }
+
     fn rebuild_backbuffer_views(&mut self) -> Result<()> {
         let backbuffer: ID3D11Texture2D = unsafe { self.swap_chain.GetBuffer(0) }
             .map_err(|err| Key2PcError::Display(format!("SwapChain GetBuffer failed: {err}")))?;
@@ -437,7 +466,7 @@ impl D3dRenderer {
             .map_err(|err| Key2PcError::Display(format!("CreateRenderTargetView failed: {err}")))?;
         self.backbuffer_rtv = rtv;
 
-        if let Some(video_enum) = &self.video_enum {
+        if let (Some(video_device), Some(video_enum)) = (&self.video_device, &self.video_enum) {
             let desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
                 ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
                 Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
@@ -446,7 +475,7 @@ impl D3dRenderer {
             };
             let mut out_view: Option<ID3D11VideoProcessorOutputView> = None;
             unsafe {
-                self.video_device.CreateVideoProcessorOutputView(
+                video_device.CreateVideoProcessorOutputView(
                     &backbuffer,
                     video_enum,
                     &desc,
@@ -465,6 +494,12 @@ impl D3dRenderer {
         self.input_view = None;
         self.nv12_gpu = None;
         self.nv12_staging = None;
+        self.src_width = width;
+        self.src_height = height;
+
+        if self.video_device.is_none() {
+            return Ok(());
+        }
 
         let staging_desc = D3D11_TEXTURE2D_DESC {
             Width: width,
@@ -497,8 +532,6 @@ impl D3dRenderer {
 
         self.nv12_staging = staging;
         self.nv12_gpu = gpu;
-        self.src_width = width;
-        self.src_height = height;
         Ok(())
     }
 
@@ -507,6 +540,12 @@ impl D3dRenderer {
         self.output_view = None;
         self.processor = None;
         self.video_enum = None;
+        self.dest_rect = compute_aspect_rect(src_w, src_h, self.win_width, self.win_height);
+
+        let (Some(video_device), Some(video_context)) = (&self.video_device, &self.video_context)
+        else {
+            return Ok(());
+        };
 
         let content_desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -525,16 +564,15 @@ impl D3dRenderer {
             Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
         };
 
-        let video_enum = unsafe { self.video_device.CreateVideoProcessorEnumerator(&content_desc) }
+        let video_enum = unsafe { video_device.CreateVideoProcessorEnumerator(&content_desc) }
             .map_err(|err| {
                 Key2PcError::Display(format!("Viewer CreateVideoProcessorEnumerator failed: {err}"))
             })?;
-        let processor = unsafe { self.video_device.CreateVideoProcessor(&video_enum, 0) }
+        let processor = unsafe { video_device.CreateVideoProcessor(&video_enum, 0) }
             .map_err(|err| {
                 Key2PcError::Display(format!("Viewer CreateVideoProcessor failed: {err}"))
             })?;
 
-        self.dest_rect = compute_aspect_rect(src_w, src_h, self.win_width, self.win_height);
         let src_rect = RECT {
             left: 0,
             top: 0,
@@ -548,16 +586,14 @@ impl D3dRenderer {
             bottom: self.win_height as i32,
         };
         unsafe {
-            self.video_context
-                .VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&src_rect));
-            self.video_context.VideoProcessorSetStreamDestRect(
+            video_context.VideoProcessorSetStreamSourceRect(&processor, 0, true, Some(&src_rect));
+            video_context.VideoProcessorSetStreamDestRect(
                 &processor,
                 0,
                 true,
                 Some(&self.dest_rect),
             );
-            self.video_context
-                .VideoProcessorSetOutputTargetRect(&processor, true, Some(&full_target));
+            video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&full_target));
         }
 
         if let Some(gpu_tex) = &self.nv12_gpu {
@@ -570,7 +606,7 @@ impl D3dRenderer {
             };
             let mut in_view: Option<ID3D11VideoProcessorInputView> = None;
             unsafe {
-                self.video_device.CreateVideoProcessorInputView(
+                video_device.CreateVideoProcessorInputView(
                     gpu_tex,
                     &video_enum,
                     &in_desc,
@@ -587,6 +623,95 @@ impl D3dRenderer {
         self.processor = Some(processor);
         self.rebuild_backbuffer_views()?;
         Ok(())
+    }
+}
+
+fn create_viewer_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
+    let attempts = [
+        (
+            D3D_DRIVER_TYPE_HARDWARE,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+        ),
+        (D3D_DRIVER_TYPE_HARDWARE, D3D11_CREATE_DEVICE_BGRA_SUPPORT),
+        (D3D_DRIVER_TYPE_WARP, D3D11_CREATE_DEVICE_BGRA_SUPPORT),
+    ];
+
+    let mut last_err = String::from("D3D11CreateDevice failed");
+    for (driver, flags) in attempts {
+        let mut device: Option<ID3D11Device> = None;
+        let mut context: Option<ID3D11DeviceContext> = None;
+        match unsafe {
+            D3D11CreateDevice(
+                None,
+                driver,
+                Default::default(),
+                flags,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        } {
+            Ok(()) => {
+                if let (Some(d), Some(c)) = (device, context) {
+                    return Ok((d, c));
+                }
+            }
+            Err(err) => last_err = err.to_string(),
+        }
+    }
+    Err(Key2PcError::Display(format!(
+        "Viewer D3D11CreateDevice failed: {last_err}"
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nv12_to_bgra_scaled(
+    nv12: &[u8],
+    src_w: usize,
+    src_h: usize,
+    dst: &mut [u8],
+    dst_w: usize,
+    dst_h: usize,
+    dst_pitch: usize,
+    dest_rect: RECT,
+) {
+    dst.fill(0);
+    if src_w == 0 || src_h == 0 || nv12.len() < src_w * src_h * 3 / 2 {
+        return;
+    }
+    let rx0 = dest_rect.left.max(0) as usize;
+    let ry0 = dest_rect.top.max(0) as usize;
+    let rx1 = (dest_rect.right.max(0) as usize).min(dst_w);
+    let ry1 = (dest_rect.bottom.max(0) as usize).min(dst_h);
+    let rw = rx1.saturating_sub(rx0).max(1);
+    let rh = ry1.saturating_sub(ry0).max(1);
+    let uv_base = src_w * src_h;
+
+    for dy in ry0..ry1 {
+        let sy = ((dy - ry0) * src_h) / rh;
+        let y_row = sy * src_w;
+        let uv_row = uv_base + (sy / 2) * src_w;
+        let row_out = &mut dst[dy * dst_pitch..dy * dst_pitch + dst_w * 4];
+        for dx in rx0..rx1 {
+            let sx = ((dx - rx0) * src_w) / rw;
+            let y_val = i32::from(nv12[y_row + sx]) - 16;
+            let uv_idx = uv_row + (sx & !1);
+            let u_val = i32::from(nv12[uv_idx]) - 128;
+            let v_val = i32::from(nv12[uv_idx + 1]) - 128;
+
+            let c = y_val.max(0) * 298;
+            let r = ((c + 409 * v_val + 128) >> 8).clamp(0, 255) as u8;
+            let g = ((c - 100 * u_val - 208 * v_val + 128) >> 8).clamp(0, 255) as u8;
+            let b = ((c + 516 * u_val + 128) >> 8).clamp(0, 255) as u8;
+
+            let px = dx * 4;
+            row_out[px] = b;
+            row_out[px + 1] = g;
+            row_out[px + 2] = r;
+            row_out[px + 3] = 255;
+        }
     }
 }
 
