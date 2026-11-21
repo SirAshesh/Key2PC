@@ -7,12 +7,12 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 use windows::core::{w, Interface, BOOL, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
     ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_SHADER_RESOURCE,
+    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET,
     D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
     D3D11_MAP_WRITE, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -33,8 +33,9 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, GetStockObject, MonitorFromWindow, BLACK_BRUSH, HBRUSH, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST,
+    BeginPaint, DrawTextW, EndPaint, FillRect, GetMonitorInfoW, GetStockObject, InvalidateRect,
+    MonitorFromWindow, SetBkMode, SetTextColor, BLACK_BRUSH, DT_CENTER, DT_WORDBREAK, HBRUSH,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -48,7 +49,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GWL_STYLE, HWND_TOP, IDC_ARROW, MSG, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER,
     SW_HIDE, SW_SHOW, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KILLFOCUS,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN,
     WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
@@ -87,6 +88,7 @@ pub struct DisplayViewer {
     hwnd_raw: isize,
     visible: Arc<AtomicBool>,
     latest_frame: Arc<Mutex<Option<DecodedFrame>>>,
+    status_text: Arc<Mutex<String>>,
     command_tx: Sender<ViewerCommand>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -98,6 +100,11 @@ impl DisplayViewer {
         let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<isize>>(1);
         let latest_frame = Arc::new(Mutex::new(None));
         let frame_slot = Arc::clone(&latest_frame);
+        let status_text = Arc::new(Mutex::new(
+            "Waiting for PC connection on local network...\nEnsure Key2PC is running on PC with role: receiver"
+                .to_string(),
+        ));
+        let status_slot = Arc::clone(&status_text);
         let visible = Arc::new(AtomicBool::new(options.start_visible));
         let visible_flag = Arc::clone(&visible);
 
@@ -110,6 +117,7 @@ impl DisplayViewer {
                 if let Err(err) = run_viewer_loop(
                     options,
                     frame_slot,
+                    status_slot,
                     visible_flag,
                     command_rx,
                     event_tx,
@@ -129,11 +137,32 @@ impl DisplayViewer {
                 hwnd_raw,
                 visible,
                 latest_frame,
+                status_text,
                 command_tx,
                 handle: Mutex::new(Some(handle)),
             },
             event_rx,
         ))
+    }
+
+    pub fn set_status_text(&self, text: impl Into<String>) {
+        let new_text = text.into();
+        let changed = if let Ok(mut guard) = self.status_text.lock() {
+            if *guard != new_text {
+                *guard = new_text;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed {
+            let hwnd = HWND(self.hwnd_raw as *mut _);
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, true);
+            }
+        }
     }
 
     pub fn push_frame(&self, frame: DecodedFrame) {
@@ -378,15 +407,18 @@ impl D3dRenderer {
                 }
             }
 
-            let stream = D3D11_VIDEO_PROCESSOR_STREAM {
+            let streams = [D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: true.into(),
                 pInputSurface: ManuallyDrop::new(Some(in_view.clone())),
                 ..Default::default()
-            };
-            unsafe { video_context.VideoProcessorBlt(processor, out_view, 0, &[stream]) }
-                .map_err(|err| {
-                    Key2PcError::Display(format!("Viewer VideoProcessorBlt failed: {err}"))
-                })?;
+            }];
+            let blt_res =
+                unsafe { video_context.VideoProcessorBlt(processor, out_view, 0, &streams) };
+            let [stream] = streams;
+            let _ = ManuallyDrop::into_inner(stream.pInputSurface);
+            blt_res.map_err(|err| {
+                Key2PcError::Display(format!("Viewer VideoProcessorBlt failed: {err}"))
+            })?;
         } else {
             self.render_nv12_software_fallback(frame)?;
         }
@@ -522,13 +554,16 @@ impl D3dRenderer {
 
         let gpu_desc = D3D11_TEXTURE2D_DESC {
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            BindFlags: 0,
             CPUAccessFlags: 0,
             ..staging_desc
         };
         let mut gpu: Option<ID3D11Texture2D> = None;
-        unsafe { self.device.CreateTexture2D(&gpu_desc, None, Some(&mut gpu)) }
-            .map_err(|err| Key2PcError::Display(format!("Create NV12 gpu failed: {err}")))?;
+        if unsafe { self.device.CreateTexture2D(&gpu_desc, None, Some(&mut gpu)) }.is_err() {
+            self.video_device = None;
+            self.video_context = None;
+            return Ok(());
+        }
 
         self.nv12_staging = staging;
         self.nv12_gpu = gpu;
@@ -542,7 +577,8 @@ impl D3dRenderer {
         self.video_enum = None;
         self.dest_rect = compute_aspect_rect(src_w, src_h, self.win_width, self.win_height);
 
-        let (Some(video_device), Some(video_context)) = (&self.video_device, &self.video_context)
+        let (Some(video_device), Some(video_context)) =
+            (self.video_device.clone(), self.video_context.clone())
         else {
             return Ok(());
         };
@@ -564,14 +600,15 @@ impl D3dRenderer {
             Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
         };
 
-        let video_enum = unsafe { video_device.CreateVideoProcessorEnumerator(&content_desc) }
-            .map_err(|err| {
-                Key2PcError::Display(format!("Viewer CreateVideoProcessorEnumerator failed: {err}"))
-            })?;
-        let processor = unsafe { video_device.CreateVideoProcessor(&video_enum, 0) }
-            .map_err(|err| {
-                Key2PcError::Display(format!("Viewer CreateVideoProcessor failed: {err}"))
-            })?;
+        let Ok(video_enum) = (unsafe { video_device.CreateVideoProcessorEnumerator(&content_desc) })
+        else {
+            self.disable_gpu_video_processor();
+            return Ok(());
+        };
+        let Ok(processor) = (unsafe { video_device.CreateVideoProcessor(&video_enum, 0) }) else {
+            self.disable_gpu_video_processor();
+            return Ok(());
+        };
 
         let src_rect = RECT {
             left: 0,
@@ -597,33 +634,98 @@ impl D3dRenderer {
         }
 
         if let Some(gpu_tex) = &self.nv12_gpu {
-            let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-                FourCC: 0,
-                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-                Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                    Texture2D: Default::default(),
-                },
-            };
-            let mut in_view: Option<ID3D11VideoProcessorInputView> = None;
-            unsafe {
-                video_device.CreateVideoProcessorInputView(
-                    gpu_tex,
-                    &video_enum,
-                    &in_desc,
-                    Some(&mut in_view),
-                )
+            if let Some(view) =
+                try_create_viewer_input_view(&self.device, &video_device, &video_enum, gpu_tex, src_w, src_h)
+            {
+                match view {
+                    InputViewCreation::Reused(in_view) => self.input_view = Some(in_view),
+                    InputViewCreation::Replaced(new_tex, in_view) => {
+                        self.nv12_gpu = Some(new_tex);
+                        self.input_view = Some(in_view);
+                    }
+                }
+            } else {
+                self.disable_gpu_video_processor();
+                return Ok(());
             }
-            .map_err(|err| {
-                Key2PcError::Display(format!("Viewer CreateVideoProcessorInputView failed: {err}"))
-            })?;
-            self.input_view = in_view;
         }
 
         self.video_enum = Some(video_enum);
         self.processor = Some(processor);
-        self.rebuild_backbuffer_views()?;
+        if self.rebuild_backbuffer_views().is_err() {
+            self.disable_gpu_video_processor();
+        }
         Ok(())
     }
+
+    fn disable_gpu_video_processor(&mut self) {
+        self.video_device = None;
+        self.video_context = None;
+        self.video_enum = None;
+        self.processor = None;
+        self.input_view = None;
+        self.output_view = None;
+    }
+}
+
+enum InputViewCreation {
+    Reused(ID3D11VideoProcessorInputView),
+    Replaced(ID3D11Texture2D, ID3D11VideoProcessorInputView),
+}
+
+fn try_create_viewer_input_view(
+    device: &ID3D11Device,
+    video_device: &ID3D11VideoDevice,
+    video_enum: &ID3D11VideoProcessorEnumerator,
+    existing_tex: &ID3D11Texture2D,
+    width: u32,
+    height: u32,
+) -> Option<InputViewCreation> {
+    let desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+        FourCC: 0,
+        ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+        Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+            Texture2D: Default::default(),
+        },
+    };
+    let mut view: Option<ID3D11VideoProcessorInputView> = None;
+    if unsafe {
+        video_device.CreateVideoProcessorInputView(existing_tex, video_enum, &desc, Some(&mut view))
+    }
+    .is_ok()
+    {
+        return view.map(InputViewCreation::Reused);
+    }
+
+    let rt_desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_NV12,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut rt_tex: Option<ID3D11Texture2D> = None;
+    if unsafe { device.CreateTexture2D(&rt_desc, None, Some(&mut rt_tex)) }.is_err() {
+        return None;
+    }
+    let rt_tex = rt_tex?;
+    let mut rt_view: Option<ID3D11VideoProcessorInputView> = None;
+    if unsafe {
+        video_device.CreateVideoProcessorInputView(&rt_tex, video_enum, &desc, Some(&mut rt_view))
+    }
+    .is_ok()
+    {
+        return rt_view.map(|v| InputViewCreation::Replaced(rt_tex, v));
+    }
+    None
 }
 
 fn create_viewer_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
@@ -718,6 +820,8 @@ fn nv12_to_bgra_scaled(
 struct ViewerWindowState {
     renderer: D3dRenderer,
     latest_frame: Arc<Mutex<Option<DecodedFrame>>>,
+    status_text: Arc<Mutex<String>>,
+    has_frame: bool,
     visible: Arc<AtomicBool>,
     command_rx: Receiver<ViewerCommand>,
     event_tx: Sender<ViewerEvent>,
@@ -830,6 +934,7 @@ impl ViewerWindowState {
 fn run_viewer_loop(
     options: ViewerOptions,
     latest_frame: Arc<Mutex<Option<DecodedFrame>>>,
+    status_text: Arc<Mutex<String>>,
     visible: Arc<AtomicBool>,
     command_rx: Receiver<ViewerCommand>,
     event_tx: Sender<ViewerEvent>,
@@ -883,6 +988,8 @@ fn run_viewer_loop(
     let mut state = Box::new(ViewerWindowState {
         renderer,
         latest_frame,
+        status_text,
+        has_frame: false,
         visible,
         command_rx,
         event_tx,
@@ -952,10 +1059,41 @@ unsafe extern "system" fn viewer_wnd_proc(
             if let Some(frame) = frame_opt {
                 let (w, h) = (frame.width, frame.height);
                 if state.renderer.render_nv12(&frame).is_ok() {
+                    state.has_frame = true;
                     state.update_fps_title(hwnd, w, h);
                 }
             }
             LRESULT(0)
+        }
+        WM_PAINT => {
+            if !state.has_frame {
+                let mut ps = PAINTSTRUCT::default();
+                let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+                let mut rect = RECT::default();
+                let _ = unsafe { GetClientRect(hwnd, &mut rect) };
+                let brush = HBRUSH(unsafe { GetStockObject(BLACK_BRUSH) }.0);
+                unsafe {
+                    FillRect(hdc, &rect, brush);
+                    SetBkMode(hdc, TRANSPARENT);
+                    SetTextColor(hdc, COLORREF(0x00E5_E7EB));
+                }
+                let text = state
+                    .status_text
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                let mut wide: Vec<u16> = text.encode_utf16().collect();
+                if !wide.is_empty() {
+                    let h = (rect.bottom - rect.top).max(1);
+                    rect.top = (h / 2 - 32).max(0);
+                    unsafe {
+                        DrawTextW(hdc, &mut wide, &mut rect, DT_CENTER | DT_WORDBREAK);
+                    }
+                }
+                let _ = unsafe { EndPaint(hwnd, &ps) };
+                return LRESULT(0);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_APP_COMMAND => {
             while let Ok(cmd) = state.command_rx.try_recv() {

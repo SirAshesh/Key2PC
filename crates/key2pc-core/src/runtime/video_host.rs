@@ -164,6 +164,7 @@ fn run_video_streamer_loop(
     let epoch = Instant::now();
     let frame_interval = Duration::from_micros((1_000_000 / u64::from(cfg.fps)).max(4000));
     let mut last_sent_at = Instant::now() - frame_interval;
+    let mut logged_error = false;
 
     while running.load(Ordering::Acquire) {
         let (viewer_opt, force_idr) = {
@@ -192,7 +193,11 @@ fn run_video_streamer_loop(
                     bounds_callback(cap.bounds());
                     capturer = Some(cap);
                 }
-                Err(_) => {
+                Err(err) => {
+                    if !logged_error {
+                        crate::runtime::write_error_log(None, &err.to_string());
+                        logged_error = true;
+                    }
                     thread::sleep(Duration::from_millis(250));
                     continue;
                 }
@@ -202,7 +207,11 @@ fn run_video_streamer_loop(
             let (tw, th) = capturer.as_ref().unwrap().target_size();
             match MfH264Encoder::new(tw, th, cfg.fps, cfg.bitrate_kbps) {
                 Ok(enc) => encoder = Some(enc),
-                Err(_) => {
+                Err(err) => {
+                    if !logged_error {
+                        crate::runtime::write_error_log(None, &err.to_string());
+                        logged_error = true;
+                    }
                     thread::sleep(Duration::from_millis(250));
                     continue;
                 }
@@ -417,6 +426,7 @@ fn run_video_viewer_rx_loop(
     let mut last_keyframe_req = Instant::now() - Duration::from_secs(2);
     let epoch = Instant::now();
     let mut was_visible = false;
+    let mut has_keyframe = false;
 
     while running.load(Ordering::Acquire) {
         let is_visible = viewer.is_visible();
@@ -431,6 +441,7 @@ fn run_video_viewer_rx_loop(
                     }
                 }
                 assembler.reset();
+                has_keyframe = false;
                 was_visible = false;
             }
             thread::sleep(Duration::from_millis(40));
@@ -439,6 +450,15 @@ fn run_video_viewer_rx_loop(
         was_visible = true;
 
         if let Some(peer) = peer_opt {
+            if !has_keyframe {
+                viewer.set_status_text(format!(
+                    "Connected to {}\nWaiting for {}x{} stream on UDP {}...",
+                    peer.ip(),
+                    default_w,
+                    default_h,
+                    peer.port()
+                ));
+            }
             if last_hello.elapsed() >= Duration::from_millis(450) {
                 last_hello = Instant::now();
                 let hdr = VideoPacketHeader::control(
@@ -451,6 +471,11 @@ fn run_video_viewer_rx_loop(
                     let _ = socket.send_to(&control_buf, peer);
                 }
             }
+        } else {
+            viewer.set_status_text(
+                "Searching for PC on local network...\nEnsure Key2PC is running on PC with role: receiver"
+            );
+            has_keyframe = false;
         }
 
         match socket.recv_from(&mut buf) {
@@ -476,6 +501,27 @@ fn run_video_viewer_rx_loop(
                 }
 
                 if let Some(assembled) = frame_opt {
+                    if assembled.is_keyframe {
+                        has_keyframe = true;
+                    } else if !has_keyframe {
+                        if last_keyframe_req.elapsed() >= Duration::from_millis(250) {
+                            if let Some(peer) = peer_opt {
+                                last_keyframe_req = Instant::now();
+                                let req = VideoPacketHeader::control(
+                                    VideoPacketKind::KeyframeReq,
+                                    0,
+                                    0,
+                                    0,
+                                );
+                                if encode_video_packet(&req, &[], &auth_key, &mut control_buf)
+                                    .is_ok()
+                                {
+                                    let _ = socket.send_to(&control_buf, peer);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     let fw = u32::from(assembled.width).max(default_w);
                     let fh = u32::from(assembled.height).max(default_h);
                     if decoder.is_none() || decoded_size != (fw, fh) {

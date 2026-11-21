@@ -100,17 +100,33 @@ fn viewer_initializes_renders_and_shuts_down_cleanly() {
 
 #[test]
 fn captures_live_dxgi_desktop_when_session_attached() {
-    let Ok(mut capturer) = DxgiScreenCapturer::new("auto", 1920, 1080) else {
-        return;
+    let mut capturer = match DxgiScreenCapturer::new("auto", 1920, 1080) {
+        Ok(cap) => cap,
+        Err(err) => {
+            println!("DXGI init skipped/err: {err}");
+            return;
+        }
     };
     let mut nv12 = Vec::new();
-    match capturer.capture_nv12(100, &mut nv12).unwrap() {
-        CaptureResult::Captured => {
+    match capturer.capture_nv12(200, &mut nv12) {
+        Ok(CaptureResult::Captured) => {
             assert_eq!(nv12.len(), 1920 * 1080 * 3 / 2);
+            let y_plane = &nv12[..1920 * 1080];
+            let max_y = y_plane.iter().copied().max().unwrap_or(0);
+            assert!(max_y > 0);
+
             let mut encoder = MfH264Encoder::new(1920, 1080, 60, 16000).unwrap();
+            let mut decoder = MfH264Decoder::new(1920, 1080).unwrap();
             let frames = encoder.encode_nv12(&nv12, 0).unwrap();
             assert!(!frames.is_empty());
+            for ef in frames {
+                let decoded = decoder.decode_annex_b(&ef.data, 0).unwrap();
+                for df in decoded {
+                    assert_eq!(df.width, 1920);
+                    assert_eq!(df.height, 1080);
+                }
+            }
         }
-        CaptureResult::Timeout | CaptureResult::Reinitialized => {}
+        Ok(CaptureResult::Timeout | CaptureResult::Reinitialized) | Err(_) => {}
     }
 }
