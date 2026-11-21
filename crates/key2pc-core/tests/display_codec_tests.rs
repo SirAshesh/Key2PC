@@ -152,6 +152,11 @@ fn viewer_initializes_renders_and_shuts_down_cleanly() {
         width: 1280,
         height: 720,
     });
+    viewer.push_frame(DecodedFrame {
+        nv12_data: vec![96u8; 1920 * 1080 * 3 / 2],
+        width: 1920,
+        height: 1080,
+    });
     viewer.send_command(ViewerCommand::SetFullscreen(true));
     let mut saw_fullscreen = false;
     for _ in 0..20 {
@@ -198,5 +203,27 @@ fn captures_live_dxgi_desktop_when_session_attached() {
             }
         }
         Ok(CaptureResult::Timeout | CaptureResult::Reinitialized) | Err(_) => {}
+    }
+}
+
+#[test]
+fn handles_dynamic_resolution_switch_without_blocking() {
+    for (w, h) in [(1920u32, 1080u32), (1280u32, 720u32)] {
+        let mut encoder = MfH264Encoder::new(w, h, 60, 12000).unwrap();
+        let mut decoder = MfH264Decoder::new(w, h).unwrap();
+        let nv12 = vec![120u8; (w * h * 3 / 2) as usize];
+        let mut got_decoded = false;
+        for idx in 0..4 {
+            let encoded = encoder.encode_nv12(&nv12, i64::from(idx) * 166_666).unwrap();
+            for frame in encoded {
+                let decoded = decoder.decode_annex_b(&frame.data, i64::from(idx) * 166_666).unwrap();
+                for df in decoded {
+                    assert_eq!(df.width, w);
+                    assert_eq!(df.height, h);
+                    got_decoded = true;
+                }
+            }
+        }
+        assert!(got_decoded);
     }
 }

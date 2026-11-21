@@ -1,6 +1,7 @@
 use std::mem::ManuallyDrop;
 use std::ptr;
 use std::slice;
+use std::time::{Duration, Instant};
 
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::RECT;
@@ -23,8 +24,9 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
-    IDXGIOutputDuplication, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
-    DXGI_OUTDUPL_FRAME_INFO,
+    IDXGIOutputDuplication, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
+    DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayDevicesW,
@@ -269,6 +271,7 @@ impl Drop for GdiCaptureFallback {
 }
 
 pub struct DxgiScreenCapturer {
+    monitor_setting: String,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     output1: IDXGIOutput1,
@@ -281,85 +284,98 @@ pub struct DxgiScreenCapturer {
     bounds: DesktopBounds,
     target_width: u32,
     target_height: u32,
+    last_bounds_check: Instant,
+    last_dxgi_retry: Instant,
+}
+
+struct CapturePipelineState {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    output1: IDXGIOutput1,
+    duplication: Option<IDXGIOutputDuplication>,
+    gpu_converter: Option<GpuColorConverter>,
+    cpu_bgra_staging: Option<ID3D11Texture2D>,
+    gdi_fallback: Option<GdiCaptureFallback>,
+    src_width: u32,
+    src_height: u32,
+    bounds: DesktopBounds,
 }
 
 impl DxgiScreenCapturer {
     pub fn new(monitor_setting: &str, target_width: u32, target_height: u32) -> Result<Self> {
-        let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-        let outputs = collect_outputs()?;
-        if outputs.is_empty() {
-            return Err(Key2PcError::Display(
-                "No attached desktop monitors found".to_string(),
-            ));
-        }
-
-        let infos: Vec<MonitorInfo> = outputs.iter().map(|o| o.info.clone()).collect();
-        let idx = select_best_monitor(monitor_setting, &infos);
-        let selected = outputs.into_iter().nth(idx).unwrap();
-        let bounds = selected.info.bounds;
-        let src_w = bounds.width as u32;
-        let src_h = bounds.height as u32;
         let dst_w = target_width & !1;
         let dst_h = target_height & !1;
-
-        let (device, context) = create_adapter_device(&selected.adapter)?;
-        if let Ok(mt) = device.cast::<ID3D11Multithread>() {
-            let _ = unsafe { mt.SetMultithreadProtected(true) };
-        }
-
-        let output1: IDXGIOutput1 = selected
-            .output
-            .cast()
-            .map_err(|err| Key2PcError::Display(format!("IDXGIOutput1 cast failed: {err}")))?;
-
-        let duplication = unsafe { output1.DuplicateOutput(&device) }.ok();
-        let (gpu_converter, cpu_bgra_staging, gdi_fallback) = if duplication.is_some() {
-            let conv =
-                try_create_gpu_converter(&device, &context, src_w, src_h, dst_w, dst_h).ok();
-            let staging = if conv.is_none() {
-                Some(create_texture(
-                    &device,
-                    src_w,
-                    src_h,
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
-                    D3D11_USAGE_STAGING,
-                    0,
-                    D3D11_CPU_ACCESS_READ.0 as u32,
-                )?)
-            } else {
-                None
-            };
-            (conv, staging, None)
-        } else {
-            (None, None, Some(GdiCaptureFallback::new(bounds)?))
-        };
+        let state = build_capture_pipeline(monitor_setting, dst_w, dst_h, false)?;
+        let now = Instant::now();
 
         Ok(Self {
-            device,
-            context,
-            output1,
-            duplication,
-            gpu_converter,
-            cpu_bgra_staging,
-            gdi_fallback,
-            src_width: src_w,
-            src_height: src_h,
-            bounds,
+            monitor_setting: monitor_setting.to_string(),
+            device: state.device,
+            context: state.context,
+            output1: state.output1,
+            duplication: state.duplication,
+            gpu_converter: state.gpu_converter,
+            cpu_bgra_staging: state.cpu_bgra_staging,
+            gdi_fallback: state.gdi_fallback,
+            src_width: state.src_width,
+            src_height: state.src_height,
+            bounds: state.bounds,
             target_width: dst_w,
             target_height: dst_h,
+            last_bounds_check: now,
+            last_dxgi_retry: now,
         })
     }
 
-    fn recreate_duplication(&mut self) -> Result<()> {
-        if let Ok(dup) = unsafe { self.output1.DuplicateOutput(&self.device) } {
-            self.duplication = Some(dup);
-        } else {
-            self.duplication = None;
-            if self.gdi_fallback.is_none() {
-                self.gdi_fallback = Some(GdiCaptureFallback::new(self.bounds)?);
-            }
+    pub fn capture_gdi_snapshot(&mut self, out_nv12: &mut Vec<u8>) -> Result<()> {
+        if let Some(gdi) = &mut self.gdi_fallback {
+            return gdi.capture_nv12(
+                self.target_width as usize,
+                self.target_height as usize,
+                out_nv12,
+            );
         }
+        let mut gdi = GdiCaptureFallback::new(self.bounds)?;
+        gdi.capture_nv12(
+            self.target_width as usize,
+            self.target_height as usize,
+            out_nv12,
+        )
+    }
+
+    fn rebuild_pipeline(&mut self, prefer_gdi: bool) -> Result<()> {
+        self.duplication = None;
+        self.gpu_converter = None;
+        self.cpu_bgra_staging = None;
+        self.gdi_fallback = None;
+        let state = build_capture_pipeline(
+            &self.monitor_setting,
+            self.target_width,
+            self.target_height,
+            prefer_gdi,
+        )?;
+        self.device = state.device;
+        self.context = state.context;
+        self.output1 = state.output1;
+        self.duplication = state.duplication;
+        self.gpu_converter = state.gpu_converter;
+        self.cpu_bgra_staging = state.cpu_bgra_staging;
+        self.gdi_fallback = state.gdi_fallback;
+        self.src_width = state.src_width;
+        self.src_height = state.src_height;
+        self.bounds = state.bounds;
+        let now = Instant::now();
+        self.last_bounds_check = now;
+        self.last_dxgi_retry = now;
         Ok(())
+    }
+
+    fn recreate_duplication(&mut self) -> Result<()> {
+        std::thread::sleep(Duration::from_millis(75));
+        if self.rebuild_pipeline(false).is_ok() {
+            return Ok(());
+        }
+        self.rebuild_pipeline(true)
     }
 
     fn copy_gpu_nv12(&self, conv: &GpuColorConverter, out_nv12: &mut Vec<u8>) -> Result<()> {
@@ -456,6 +472,37 @@ impl ScreenCapturer for DxgiScreenCapturer {
     }
 
     fn capture_nv12(&mut self, timeout_ms: u32, out_nv12: &mut Vec<u8>) -> Result<CaptureResult> {
+        if self.last_bounds_check.elapsed() >= Duration::from_millis(750) {
+            self.last_bounds_check = Instant::now();
+            if let Ok(current_bounds) = query_active_monitor_bounds(&self.monitor_setting) {
+                if current_bounds != self.bounds {
+                    self.recreate_duplication()?;
+                    return Ok(CaptureResult::Reinitialized);
+                }
+            }
+        }
+
+        if self.duplication.is_none() && self.last_dxgi_retry.elapsed() >= Duration::from_secs(2) {
+            self.last_dxgi_retry = Instant::now();
+            if let Ok(state) =
+                build_capture_pipeline(&self.monitor_setting, self.target_width, self.target_height, false)
+            {
+                if state.duplication.is_some() {
+                    self.device = state.device;
+                    self.context = state.context;
+                    self.output1 = state.output1;
+                    self.duplication = state.duplication;
+                    self.gpu_converter = state.gpu_converter;
+                    self.cpu_bgra_staging = state.cpu_bgra_staging;
+                    self.gdi_fallback = None;
+                    self.src_width = state.src_width;
+                    self.src_height = state.src_height;
+                    self.bounds = state.bounds;
+                    return Ok(CaptureResult::Reinitialized);
+                }
+            }
+        }
+
         let Some(duplication) = &self.duplication else {
             if let Some(gdi) = &mut self.gdi_fallback {
                 gdi.capture_nv12(
@@ -477,10 +524,16 @@ impl ScreenCapturer for DxgiScreenCapturer {
         };
 
         if let Err(err) = acquire_res {
-            if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
+            let code = err.code();
+            if code == DXGI_ERROR_WAIT_TIMEOUT {
                 return Ok(CaptureResult::Timeout);
             }
-            if err.code() == DXGI_ERROR_ACCESS_LOST {
+            if code == DXGI_ERROR_ACCESS_LOST
+                || code == DXGI_ERROR_INVALID_CALL
+                || code == DXGI_ERROR_DEVICE_RESET
+                || code == DXGI_ERROR_DEVICE_REMOVED
+                || code == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+            {
                 self.recreate_duplication()?;
                 return Ok(CaptureResult::Reinitialized);
             }
@@ -492,17 +545,31 @@ impl ScreenCapturer for DxgiScreenCapturer {
             Key2PcError::Display("Empty desktop resource".to_string())
         })?;
 
+        let Ok(desktop_tex) = desktop_res.cast::<ID3D11Texture2D>() else {
+            let _ = unsafe { duplication.ReleaseFrame() };
+            return Err(Key2PcError::Display(
+                "Frame texture cast failed".to_string(),
+            ));
+        };
+
+        let mut tex_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { desktop_tex.GetDesc(&mut tex_desc) };
+        if tex_desc.Width != self.src_width || tex_desc.Height != self.src_height {
+            let _ = unsafe { duplication.ReleaseFrame() };
+            self.recreate_duplication()?;
+            return Ok(CaptureResult::Reinitialized);
+        }
+
         let target_tex = if let Some(conv) = &self.gpu_converter {
             &conv.capture_tex
         } else {
             self.cpu_bgra_staging.as_ref().unwrap()
         };
 
-        let copy_res = desktop_res.cast::<ID3D11Texture2D>().map(|desktop_tex| unsafe {
+        unsafe {
             self.context.CopyResource(target_tex, &desktop_tex);
-        });
+        }
         let _ = unsafe { duplication.ReleaseFrame() };
-        copy_res.map_err(|err| Key2PcError::Display(format!("Frame texture cast failed: {err}")))?;
 
         if let Some(conv) = &self.gpu_converter {
             self.copy_gpu_nv12(conv, out_nv12)?;
@@ -511,6 +578,110 @@ impl ScreenCapturer for DxgiScreenCapturer {
         }
         Ok(CaptureResult::Captured)
     }
+}
+
+fn query_active_monitor_bounds(monitor_setting: &str) -> Result<DesktopBounds> {
+    let outputs = collect_outputs()?;
+    if outputs.is_empty() {
+        return Err(Key2PcError::Display(
+            "No attached desktop monitors found".to_string(),
+        ));
+    }
+    let infos: Vec<MonitorInfo> = outputs.iter().map(|o| o.info.clone()).collect();
+    let idx = select_best_monitor(monitor_setting, &infos);
+    Ok(infos[idx].bounds)
+}
+
+fn build_capture_pipeline(
+    monitor_setting: &str,
+    dst_w: u32,
+    dst_h: u32,
+    prefer_gdi: bool,
+) -> Result<CapturePipelineState> {
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let outputs = collect_outputs()?;
+    if outputs.is_empty() {
+        return Err(Key2PcError::Display(
+            "No attached desktop monitors found".to_string(),
+        ));
+    }
+
+    let infos: Vec<MonitorInfo> = outputs.iter().map(|o| o.info.clone()).collect();
+    let idx = select_best_monitor(monitor_setting, &infos);
+    let selected = outputs.into_iter().nth(idx).unwrap();
+    let bounds = selected.info.bounds;
+    let src_w = bounds.width as u32;
+    let src_h = bounds.height as u32;
+
+    let (device, context) = create_adapter_device(&selected.adapter)?;
+    if let Ok(mt) = device.cast::<ID3D11Multithread>() {
+        let _ = unsafe { mt.SetMultithreadProtected(true) };
+    }
+
+    let output1: IDXGIOutput1 = selected
+        .output
+        .cast()
+        .map_err(|err| Key2PcError::Display(format!("IDXGIOutput1 cast failed: {err}")))?;
+
+    let duplication = if prefer_gdi {
+        None
+    } else {
+        try_duplicate_with_brief_retry(&output1, &device)
+    };
+    let (gpu_converter, cpu_bgra_staging, gdi_fallback) = if duplication.is_some() {
+        let conv = try_create_gpu_converter(&device, &context, src_w, src_h, dst_w, dst_h).ok();
+        let staging = if conv.is_none() {
+            Some(create_texture(
+                &device,
+                src_w,
+                src_h,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                D3D11_USAGE_STAGING,
+                0,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            )?)
+        } else {
+            None
+        };
+        (conv, staging, None)
+    } else {
+        (None, None, Some(GdiCaptureFallback::new(bounds)?))
+    };
+
+    Ok(CapturePipelineState {
+        device,
+        context,
+        output1,
+        duplication,
+        gpu_converter,
+        cpu_bgra_staging,
+        gdi_fallback,
+        src_width: src_w,
+        src_height: src_h,
+        bounds,
+    })
+}
+
+fn try_duplicate_with_brief_retry(
+    output1: &IDXGIOutput1,
+    device: &ID3D11Device,
+) -> Option<IDXGIOutputDuplication> {
+    for attempt in 0..3 {
+        match unsafe { output1.DuplicateOutput(device) } {
+            Ok(dup) => return Some(dup),
+            Err(err) => {
+                let code = err.code();
+                if (code == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE || code == DXGI_ERROR_ACCESS_LOST)
+                    && attempt < 2
+                {
+                    std::thread::sleep(Duration::from_millis(60));
+                    continue;
+                }
+                return None;
+            }
+        }
+    }
+    None
 }
 
 fn create_adapter_device(adapter: &IDXGIAdapter1) -> Result<(ID3D11Device, ID3D11DeviceContext)> {

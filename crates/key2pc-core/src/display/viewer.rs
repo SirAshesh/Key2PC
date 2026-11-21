@@ -429,9 +429,14 @@ impl D3dRenderer {
                 unsafe { video_context.VideoProcessorBlt(processor, out_view, 0, &streams) };
             let [stream] = streams;
             let _ = ManuallyDrop::into_inner(stream.pInputSurface);
-            blt_res.map_err(|err| {
-                Key2PcError::Display(format!("Viewer VideoProcessorBlt failed: {err}"))
-            })?;
+            if blt_res.is_err() {
+                self.input_view = None;
+                self.processor = None;
+                self.video_enum = None;
+                self.src_width = 0;
+                self.src_height = 0;
+                self.render_nv12_software_fallback(frame)?;
+            }
         } else {
             self.render_nv12_software_fallback(frame)?;
         }
@@ -441,7 +446,16 @@ impl D3dRenderer {
         } else {
             DXGI_PRESENT(0)
         };
-        let _ = unsafe { self.swap_chain.Present(0, present_flags) };
+        if unsafe { self.swap_chain.Present(0, present_flags) }.is_err() {
+            if self.allow_tearing {
+                self.allow_tearing = false;
+                unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) }
+                    .ok()
+                    .map_err(|err| Key2PcError::Display(format!("Present failed: {err}")))?;
+            } else {
+                return Err(Key2PcError::Display("SwapChain Present failed".to_string()));
+            }
+        }
         let _ = self.hwnd;
         Ok(())
     }
@@ -1102,8 +1116,45 @@ unsafe extern "system" fn viewer_wnd_proc(
                 if state.renderer.render_nv12(&frame).is_ok() {
                     state.has_frame = true;
                     state.update_fps_title(hwnd, w, h);
+                } else {
+                    let mut rect = RECT::default();
+                    let _ = unsafe { GetClientRect(hwnd, &mut rect) };
+                    let rw = (rect.right - rect.left).max(1) as u32;
+                    let rh = (rect.bottom - rect.top).max(1) as u32;
+                    if let Ok(fresh) = D3dRenderer::new(hwnd, rw, rh) {
+                        state.renderer = fresh;
+                        if state.renderer.render_nv12(&frame).is_ok() {
+                            state.has_frame = true;
+                            state.update_fps_title(hwnd, w, h);
+                        }
+                    }
                 }
             }
+            LRESULT(0)
+        }
+        0x007E => {
+            if state.fullscreen {
+                let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if unsafe { GetMonitorInfoW(monitor, &mut mi) }.as_bool() {
+                    let r = mi.rcMonitor;
+                    unsafe {
+                        let _ = SetWindowPos(
+                            hwnd,
+                            Some(HWND_TOP),
+                            r.left,
+                            r.top,
+                            r.right - r.left,
+                            r.bottom - r.top,
+                            SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                        );
+                    }
+                }
+            }
+            let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             LRESULT(0)
         }
         WM_PAINT => {

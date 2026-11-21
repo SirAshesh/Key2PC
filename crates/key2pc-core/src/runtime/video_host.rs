@@ -54,7 +54,7 @@ impl VideoStreamerHost {
             low_delay_tos: config.network.low_delay_tos,
             broadcast: false,
             read_timeout: Some(Duration::from_millis(120)),
-            buffer_size: 524_288,
+            buffer_size: 1_048_576,
         })?);
 
         let running = Arc::new(AtomicBool::new(true));
@@ -150,6 +150,25 @@ impl Drop for VideoStreamerHost {
     }
 }
 
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[allow(clippy::too_many_arguments)]
+fn send_video_control(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    kind: VideoPacketKind,
+    width: u16,
+    height: u16,
+    timestamp_us: u64,
+    auth_key: &[u8; 32],
+    control_buf: &mut Vec<u8>,
+) {
+    let hdr = VideoPacketHeader::control(kind, width, height, timestamp_us);
+    if encode_video_packet(&hdr, &[], auth_key, control_buf).is_ok() {
+        let _ = socket.send_to(control_buf, peer);
+    }
+}
+
 fn run_video_streamer_loop(
     running: Arc<AtomicBool>,
     socket: Arc<UdpSocket>,
@@ -167,6 +186,8 @@ fn run_video_streamer_loop(
     let epoch = Instant::now();
     let frame_interval = Duration::from_micros((1_000_000 / u64::from(cfg.fps)).max(4000));
     let mut last_sent_at = Instant::now() - frame_interval;
+    let mut idle_capture_started_at = Instant::now();
+    let mut pending_keyframe = true;
     let mut logged_error = false;
 
     while running.load(Ordering::Acquire) {
@@ -176,6 +197,8 @@ fn run_video_streamer_loop(
             capturer = None;
             encoder = None;
             nv12_buf.clear();
+            pending_keyframe = true;
+            idle_capture_started_at = Instant::now();
             if let Ok(mut guard) = peer_state.lock() {
                 guard.force_keyframe = true;
             }
@@ -184,7 +207,7 @@ fn run_video_streamer_loop(
         let (viewer_opt, force_idr) = {
             let mut guard = peer_state.lock().unwrap();
             if let Some(last_hello) = guard.last_hello_at {
-                if last_hello.elapsed() >= Duration::from_secs(3) {
+                if last_hello.elapsed() >= STREAM_IDLE_TIMEOUT {
                     guard.viewer_addr = None;
                     guard.last_hello_at = None;
                 }
@@ -193,10 +216,14 @@ fn run_video_streamer_loop(
             guard.force_keyframe = false;
             (guard.viewer_addr, force)
         };
+        if force_idr {
+            pending_keyframe = true;
+        }
 
         let Some(viewer_addr) = viewer_opt else {
             capturer = None;
             encoder = None;
+            pending_keyframe = true;
             thread::sleep(Duration::from_millis(40));
             continue;
         };
@@ -206,13 +233,16 @@ fn run_video_streamer_loop(
                 Ok(cap) => {
                     bounds_callback(cap.bounds());
                     capturer = Some(cap);
+                    pending_keyframe = true;
+                    idle_capture_started_at = Instant::now();
+                    logged_error = false;
                 }
                 Err(err) => {
                     if !logged_error {
                         crate::runtime::write_error_log(None, &err.to_string());
                         logged_error = true;
                     }
-                    thread::sleep(Duration::from_millis(250));
+                    thread::sleep(Duration::from_millis(150));
                     continue;
                 }
             }
@@ -220,13 +250,16 @@ fn run_video_streamer_loop(
         if encoder.is_none() {
             let (tw, th) = capturer.as_ref().unwrap().target_size();
             match MfH264Encoder::new(tw, th, cfg.fps, cfg.bitrate_kbps) {
-                Ok(enc) => encoder = Some(enc),
+                Ok(enc) => {
+                    encoder = Some(enc);
+                    pending_keyframe = true;
+                }
                 Err(err) => {
                     if !logged_error {
                         crate::runtime::write_error_log(None, &err.to_string());
                         logged_error = true;
                     }
-                    thread::sleep(Duration::from_millis(250));
+                    thread::sleep(Duration::from_millis(150));
                     continue;
                 }
             }
@@ -234,7 +267,7 @@ fn run_video_streamer_loop(
 
         let cap = capturer.as_mut().unwrap();
         let enc = encoder.as_mut().unwrap();
-        if force_idr {
+        if pending_keyframe {
             enc.force_keyframe();
         }
 
@@ -252,19 +285,33 @@ fn run_video_streamer_loop(
             (frame_interval.as_millis() as u32).clamp(4, 33)
         };
         match cap.capture_nv12(timeout_ms, &mut nv12_buf) {
-            Ok(CaptureResult::Captured) => {}
+            Ok(CaptureResult::Captured) => {
+                idle_capture_started_at = Instant::now();
+            }
             Ok(CaptureResult::Timeout) => {
-                if !force_idr || nv12_buf.is_empty() {
+                if nv12_buf.is_empty()
+                    && idle_capture_started_at.elapsed() >= Duration::from_millis(250)
+                {
+                    let _ = cap.capture_gdi_snapshot(&mut nv12_buf);
+                    idle_capture_started_at = Instant::now();
+                }
+                let need_keepalive_refresh =
+                    !nv12_buf.is_empty() && last_sent_at.elapsed() >= Duration::from_secs(2);
+                if (!pending_keyframe && !need_keepalive_refresh) || nv12_buf.is_empty() {
                     continue;
                 }
             }
             Ok(CaptureResult::Reinitialized) => {
                 bounds_callback(cap.bounds());
                 enc.force_keyframe();
+                pending_keyframe = true;
+                nv12_buf.clear();
+                idle_capture_started_at = Instant::now();
                 continue;
             }
             Err(_) => {
                 capturer = None;
+                pending_keyframe = true;
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -275,6 +322,7 @@ fn run_video_streamer_loop(
             Ok(frames) => frames,
             Err(_) => {
                 encoder = None;
+                pending_keyframe = true;
                 continue;
             }
         };
@@ -282,6 +330,10 @@ fn run_video_streamer_loop(
         last_sent_at = Instant::now();
         let timestamp_us = epoch.elapsed().as_micros() as u64;
         for frame in encoded_frames {
+            if frame.is_keyframe {
+                pending_keyframe = false;
+            }
+            let mut pkt_counter = 0u32;
             let _ = chunk_video_frame(
                 frame_id,
                 frame.width as u16,
@@ -292,6 +344,10 @@ fn run_video_streamer_loop(
                 &auth_key,
                 |pkt_bytes| {
                     let _ = socket.send_to(pkt_bytes, viewer_addr);
+                    pkt_counter += 1;
+                    if pkt_counter.is_multiple_of(16) {
+                        thread::sleep(Duration::from_micros(120));
+                    }
                     Ok(())
                 },
             );
@@ -327,8 +383,8 @@ impl VideoViewerHost {
             bind_addr: SocketAddr::new(bind_ip, 0),
             low_delay_tos: config.network.low_delay_tos,
             broadcast: false,
-            read_timeout: Some(Duration::from_millis(50)),
-            buffer_size: 2_097_152,
+            read_timeout: Some(Duration::from_millis(25)),
+            buffer_size: 4_194_304,
         })?);
 
         let (viewer, viewer_rx) = DisplayViewer::start(ViewerOptions {
@@ -439,11 +495,12 @@ fn run_video_viewer_rx_loop(
 ) {
     let mut decoder: Option<MfH264Decoder> = None;
     let mut decoded_size = (0u32, 0u32);
-    let mut assembler = FrameAssembler::new(Duration::from_millis(40));
+    let mut assembler = FrameAssembler::new(Duration::from_millis(250));
     let mut buf = vec![0u8; 2048];
     let mut control_buf = Vec::with_capacity(64);
     let mut last_hello = Instant::now() - Duration::from_secs(2);
     let mut last_keyframe_req = Instant::now() - Duration::from_secs(2);
+    let mut last_frame_rx = Instant::now();
     let epoch = Instant::now();
     let mut was_visible = false;
     let mut has_keyframe = false;
@@ -455,10 +512,16 @@ fn run_video_viewer_rx_loop(
         if !is_visible {
             if was_visible {
                 if let Some(peer) = peer_opt {
-                    let hdr = VideoPacketHeader::control(VideoPacketKind::StreamStop, 0, 0, 0);
-                    if encode_video_packet(&hdr, &[], &auth_key, &mut control_buf).is_ok() {
-                        let _ = socket.send_to(&control_buf, peer);
-                    }
+                    send_video_control(
+                        &socket,
+                        peer,
+                        VideoPacketKind::StreamStop,
+                        0,
+                        0,
+                        0,
+                        &auth_key,
+                        &mut control_buf,
+                    );
                 }
                 assembler.reset();
                 has_keyframe = false;
@@ -479,87 +542,151 @@ fn run_video_viewer_rx_loop(
                     peer.port()
                 ));
             }
-            if last_hello.elapsed() >= Duration::from_millis(450) {
+            if last_hello.elapsed() >= Duration::from_millis(350) {
                 last_hello = Instant::now();
-                let hdr = VideoPacketHeader::control(
+                send_video_control(
+                    &socket,
+                    peer,
                     VideoPacketKind::StreamHello,
                     default_w as u16,
                     default_h as u16,
                     epoch.elapsed().as_micros() as u64,
+                    &auth_key,
+                    &mut control_buf,
                 );
-                if encode_video_packet(&hdr, &[], &auth_key, &mut control_buf).is_ok() {
-                    let _ = socket.send_to(&control_buf, peer);
-                }
+            }
+            if has_keyframe
+                && last_frame_rx.elapsed() >= Duration::from_secs(3)
+                && last_keyframe_req.elapsed() >= Duration::from_millis(850)
+            {
+                last_keyframe_req = Instant::now();
+                send_video_control(
+                    &socket,
+                    peer,
+                    VideoPacketKind::KeyframeReq,
+                    0,
+                    0,
+                    0,
+                    &auth_key,
+                    &mut control_buf,
+                );
             }
         } else {
             viewer.set_status_text(
-                "Searching for PC on local network...\nEnsure Key2PC is running on PC with role: receiver"
+                "Searching for PC on local network...\nEnsure Key2PC is running on PC with role: receiver",
             );
             has_keyframe = false;
         }
 
-        match socket.recv_from(&mut buf) {
-            Ok((len, src)) => {
-                let Ok((hdr, payload)) = decode_video_packet(&buf[..len], &auth_key) else {
-                    continue;
-                };
-                if let Some(expected_peer) = peer_opt {
-                    if src.ip() != expected_peer.ip() {
+        let mut packets_handled = 0u32;
+        while packets_handled < 32 {
+            match socket.recv_from(&mut buf) {
+                Ok((len, src)) => {
+                    packets_handled += 1;
+                    let Ok((hdr, payload)) = decode_video_packet(&buf[..len], &auth_key) else {
                         continue;
-                    }
-                }
-                let (frame_opt, needs_keyframe) =
-                    assembler.push_chunk(hdr, payload, Instant::now());
-                if needs_keyframe && last_keyframe_req.elapsed() >= Duration::from_millis(250) {
-                    if let Some(peer) = peer_opt {
-                        last_keyframe_req = Instant::now();
-                        let req = VideoPacketHeader::control(VideoPacketKind::KeyframeReq, 0, 0, 0);
-                        if encode_video_packet(&req, &[], &auth_key, &mut control_buf).is_ok() {
-                            let _ = socket.send_to(&control_buf, peer);
+                    };
+                    if let Some(expected_peer) = peer_opt {
+                        if src.ip() != expected_peer.ip() {
+                            continue;
                         }
                     }
-                }
+                    let (frame_opt, needs_keyframe) =
+                        assembler.push_chunk(hdr, payload, Instant::now());
+                    let req_cooldown = if has_keyframe {
+                        Duration::from_millis(850)
+                    } else {
+                        Duration::from_millis(350)
+                    };
+                    if needs_keyframe && last_keyframe_req.elapsed() >= req_cooldown {
+                        if let Some(peer) = peer_opt {
+                            last_keyframe_req = Instant::now();
+                            send_video_control(
+                                &socket,
+                                peer,
+                                VideoPacketKind::KeyframeReq,
+                                0,
+                                0,
+                                0,
+                                &auth_key,
+                                &mut control_buf,
+                            );
+                        }
+                    }
 
-                if let Some(assembled) = frame_opt {
-                    if assembled.is_keyframe {
-                        has_keyframe = true;
-                    } else if !has_keyframe {
-                        if last_keyframe_req.elapsed() >= Duration::from_millis(250) {
-                            if let Some(peer) = peer_opt {
-                                last_keyframe_req = Instant::now();
-                                let req = VideoPacketHeader::control(
-                                    VideoPacketKind::KeyframeReq,
-                                    0,
-                                    0,
-                                    0,
-                                );
-                                if encode_video_packet(&req, &[], &auth_key, &mut control_buf)
-                                    .is_ok()
-                                {
-                                    let _ = socket.send_to(&control_buf, peer);
+                    if let Some(assembled) = frame_opt {
+                        if assembled.is_keyframe {
+                            has_keyframe = true;
+                        } else if !has_keyframe {
+                            if last_keyframe_req.elapsed() >= Duration::from_millis(350) {
+                                if let Some(peer) = peer_opt {
+                                    last_keyframe_req = Instant::now();
+                                    send_video_control(
+                                        &socket,
+                                        peer,
+                                        VideoPacketKind::KeyframeReq,
+                                        0,
+                                        0,
+                                        0,
+                                        &auth_key,
+                                        &mut control_buf,
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+
+                        last_frame_rx = Instant::now();
+                        let fw = if assembled.width >= 2 {
+                            u32::from(assembled.width)
+                        } else {
+                            default_w
+                        };
+                        let fh = if assembled.height >= 2 {
+                            u32::from(assembled.height)
+                        } else {
+                            default_h
+                        };
+                        if decoder.is_none() || decoded_size != (fw, fh) {
+                            decoder = MfH264Decoder::new(fw, fh).ok();
+                            decoded_size = (fw, fh);
+                        }
+                        if let Some(dec) = decoder.as_mut() {
+                            let pts = (assembled.timestamp_us as i64).saturating_mul(10);
+                            match dec.decode_annex_b(&assembled.data, pts) {
+                                Ok(decoded_frames) => {
+                                    for df in decoded_frames {
+                                        viewer.push_frame(df);
+                                    }
+                                }
+                                Err(_) => {
+                                    decoder = None;
+                                    has_keyframe = false;
+                                    if let Some(peer) = peer_opt {
+                                        last_keyframe_req = Instant::now();
+                                        send_video_control(
+                                            &socket,
+                                            peer,
+                                            VideoPacketKind::KeyframeReq,
+                                            0,
+                                            0,
+                                            0,
+                                            &auth_key,
+                                            &mut control_buf,
+                                        );
+                                    }
                                 }
                             }
                         }
-                        continue;
-                    }
-                    let fw = u32::from(assembled.width).max(default_w);
-                    let fh = u32::from(assembled.height).max(default_h);
-                    if decoder.is_none() || decoded_size != (fw, fh) {
-                        decoder = MfH264Decoder::new(fw, fh).ok();
-                        decoded_size = (fw, fh);
-                    }
-                    if let Some(dec) = decoder.as_mut() {
-                        let pts = (assembled.timestamp_us as i64).saturating_mul(10);
-                        if let Ok(decoded_frames) = dec.decode_annex_b(&assembled.data, pts) {
-                            for df in decoded_frames {
-                                viewer.push_frame(df);
-                            }
-                        }
+                        break;
                     }
                 }
+                Err(err) if is_timeout_error(&err) => break,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(5));
+                    break;
+                }
             }
-            Err(err) if is_timeout_error(&err) => {}
-            Err(_) => thread::sleep(Duration::from_millis(5)),
         }
     }
 }
@@ -595,20 +722,32 @@ fn run_viewer_event_bridge(
                 on_visibility_changed(visible);
                 if visible {
                     if let Some(peer) = *peer_addr_slot.lock().unwrap() {
-                        let hdr = VideoPacketHeader::control(VideoPacketKind::StreamHello, 0, 0, 0);
-                        if encode_video_packet(&hdr, &[], &auth_key, &mut control_buf).is_ok() {
-                            let _ = socket.send_to(&control_buf, peer);
-                        }
+                        send_video_control(
+                            &socket,
+                            peer,
+                            VideoPacketKind::StreamHello,
+                            0,
+                            0,
+                            0,
+                            &auth_key,
+                            &mut control_buf,
+                        );
                     }
                 } else {
                     if auto_focus {
                         on_focus_active(false);
                     }
                     if let Some(peer) = *peer_addr_slot.lock().unwrap() {
-                        let hdr = VideoPacketHeader::control(VideoPacketKind::StreamStop, 0, 0, 0);
-                        if encode_video_packet(&hdr, &[], &auth_key, &mut control_buf).is_ok() {
-                            let _ = socket.send_to(&control_buf, peer);
-                        }
+                        send_video_control(
+                            &socket,
+                            peer,
+                            VideoPacketKind::StreamStop,
+                            0,
+                            0,
+                            0,
+                            &auth_key,
+                            &mut control_buf,
+                        );
                     }
                 }
             }

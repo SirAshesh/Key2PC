@@ -103,3 +103,39 @@ fn detects_frame_gap_and_requests_keyframe() {
     assert!(gap3);
     let _ = key;
 }
+
+#[test]
+fn assembles_keyframe_with_wifi_jitter_under_250ms_budget() {
+    let key = derive_auth_key("jitter-secret");
+    let raw_frame: Vec<u8> = (0..12_000).map(|i| (i % 253) as u8).collect();
+    let mut packets = Vec::new();
+    chunk_video_frame(
+        42,
+        1920,
+        1080,
+        true,
+        5555,
+        &raw_frame,
+        &key,
+        |pkt| {
+            packets.push(pkt.to_vec());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(packets.len() >= 8);
+
+    let mut assembler = FrameAssembler::new(Duration::from_millis(250));
+    let start = Instant::now();
+    let mut assembled_frame = None;
+    for (i, pkt) in packets.iter().enumerate() {
+        let (hdr, payload) = decode_video_packet(pkt, &key).unwrap();
+        let arrived_at = start + Duration::from_millis((i as u64) * 15);
+        let (done, _) = assembler.push_chunk(hdr, payload, arrived_at);
+        if done.is_some() {
+            assembled_frame = done;
+        }
+    }
+    let frame = assembled_frame.expect("Frame spread across 150ms should assemble cleanly");
+    assert_eq!(frame.data, raw_frame);
+}

@@ -2,13 +2,15 @@ use std::mem::ManuallyDrop;
 use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use windows::core::{Interface, GUID};
 use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
 use windows::Win32::Media::MediaFoundation::{
     eAVEncCommonRateControlMode_CBR, eAVEncCommonRateControlMode_LowDelayVBR,
-    eAVEncH264VProfile_Main, ICodecAPI, IMFActivate, IMFMediaEventGenerator,
-    IMFMediaType, IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer,
+    eAVEncH264VProfile_Main, ICodecAPI, IMFActivate, IMFMediaEvent, IMFMediaEventGenerator,
+    IMFMediaType, IMFSample, IMFTransform, MEError, MFCreateMediaType, MFCreateMemoryBuffer,
     MFCreateSample, MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264,
     MFVideoFormat_NV12, CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
     CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, METransformHaveOutput,
@@ -16,10 +18,11 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
     MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
-    MFSampleExtension_CleanPoint, MF_EVENT_FLAG_NONE, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE,
-    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
-    MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MFSampleExtension_CleanPoint, MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY,
+    MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
+    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
@@ -202,9 +205,30 @@ fn pull_output_sample(
     }
 }
 
+fn poll_next_mft_event(
+    event_gen: &IMFMediaEventGenerator,
+    deadline: Instant,
+) -> Result<Option<IMFMediaEvent>> {
+    loop {
+        match unsafe { event_gen.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+            Ok(ev) => return Ok(Some(ev)),
+            Err(err) if err.code() == MF_E_NO_EVENTS_AVAILABLE => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                thread::sleep(Duration::from_micros(500));
+            }
+            Err(err) => {
+                return Err(Key2PcError::Display(format!("GetEvent failed: {err}")));
+            }
+        }
+    }
+}
+
 pub struct MfH264Encoder {
     transform: IMFTransform,
     event_gen: Option<IMFMediaEventGenerator>,
+    pending_inputs: u32,
     provides_samples: bool,
     output_buf_size: u32,
     width: u32,
@@ -246,6 +270,7 @@ impl MfH264Encoder {
                     return Ok(Self {
                         transform,
                         event_gen,
+                        pending_inputs: 0,
                         provides_samples,
                         output_buf_size,
                         width,
@@ -356,15 +381,29 @@ impl VideoEncoder for MfH264Encoder {
 
         if let Some(event_gen) = self.event_gen.clone() {
             let mut input_sent = false;
-            loop {
-                let event = unsafe { event_gen.GetEvent(MF_EVENT_FLAG_NONE) }
-                    .map_err(|err| Key2PcError::Display(format!("GetEvent failed: {err}")))?;
+            if self.pending_inputs > 0 {
+                self.pending_inputs -= 1;
+                unsafe { self.transform.ProcessInput(0, &sample, 0) }
+                    .map_err(|err| Key2PcError::Display(format!("ProcessInput failed: {err}")))?;
+                input_sent = true;
+            }
+            let deadline = Instant::now() + Duration::from_millis(120);
+            while let Some(event) = poll_next_mft_event(&event_gen, deadline)? {
                 let kind = unsafe { event.GetType() }
                     .map_err(|err| Key2PcError::Display(format!("GetType failed: {err}")))?;
-                if kind == METransformNeedInput.0 as u32 && !input_sent {
-                    unsafe { self.transform.ProcessInput(0, &sample, 0) }
-                        .map_err(|err| Key2PcError::Display(format!("ProcessInput failed: {err}")))?;
-                    input_sent = true;
+                if kind == MEError.0 as u32 {
+                    return Err(Key2PcError::Display("Encoder reported MEError".to_string()));
+                }
+                if kind == METransformNeedInput.0 as u32 {
+                    if !input_sent {
+                        unsafe { self.transform.ProcessInput(0, &sample, 0) }.map_err(|err| {
+                            Key2PcError::Display(format!("ProcessInput failed: {err}"))
+                        })?;
+                        input_sent = true;
+                    } else {
+                        self.pending_inputs += 1;
+                        break;
+                    }
                 } else if kind == METransformHaveOutput.0 as u32 {
                     if let Some(out_sample) =
                         pull_output_sample(&self.transform, self.provides_samples, alloc_size)
@@ -404,6 +443,7 @@ impl VideoEncoder for MfH264Encoder {
 pub struct MfH264Decoder {
     transform: IMFTransform,
     event_gen: Option<IMFMediaEventGenerator>,
+    pending_inputs: u32,
     provides_samples: bool,
     output_buf_size: u32,
     width: u32,
@@ -439,6 +479,7 @@ impl MfH264Decoder {
                     let mut dec = Self {
                         transform,
                         event_gen,
+                        pending_inputs: 0,
                         provides_samples,
                         output_buf_size,
                         width,
@@ -599,16 +640,30 @@ impl VideoDecoder for MfH264Decoder {
         if let Some(event_gen) = self.event_gen.clone() {
             let mut frames = Vec::new();
             let mut input_sent = false;
-            loop {
-                let event = unsafe { event_gen.GetEvent(MF_EVENT_FLAG_NONE) }
-                    .map_err(|err| Key2PcError::Display(format!("Decoder GetEvent failed: {err}")))?;
+            if self.pending_inputs > 0 {
+                self.pending_inputs -= 1;
+                unsafe { self.transform.ProcessInput(0, &sample, 0) }.map_err(|err| {
+                    Key2PcError::Display(format!("Decoder ProcessInput failed: {err}"))
+                })?;
+                input_sent = true;
+            }
+            let deadline = Instant::now() + Duration::from_millis(120);
+            while let Some(event) = poll_next_mft_event(&event_gen, deadline)? {
                 let kind = unsafe { event.GetType() }
                     .map_err(|err| Key2PcError::Display(format!("Decoder GetType failed: {err}")))?;
-                if kind == METransformNeedInput.0 as u32 && !input_sent {
-                    unsafe { self.transform.ProcessInput(0, &sample, 0) }.map_err(|err| {
-                        Key2PcError::Display(format!("Decoder ProcessInput failed: {err}"))
-                    })?;
-                    input_sent = true;
+                if kind == MEError.0 as u32 {
+                    return Err(Key2PcError::Display("Decoder reported MEError".to_string()));
+                }
+                if kind == METransformNeedInput.0 as u32 {
+                    if !input_sent {
+                        unsafe { self.transform.ProcessInput(0, &sample, 0) }.map_err(|err| {
+                            Key2PcError::Display(format!("Decoder ProcessInput failed: {err}"))
+                        })?;
+                        input_sent = true;
+                    } else {
+                        self.pending_inputs += 1;
+                        break;
+                    }
                 } else if kind == METransformHaveOutput.0 as u32 {
                     match pull_output_sample(&self.transform, self.provides_samples, alloc_size) {
                         Ok(Some(out_sample)) => {

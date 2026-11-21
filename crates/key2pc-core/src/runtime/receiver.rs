@@ -117,7 +117,13 @@ impl ReceiverRuntime {
         let listen_port = main_socket.local_addr()?.port();
         let video_port = config.display.video_port;
         let disconnect_release = Duration::from_millis(config.network.disconnect_release_ms);
-        let peer_idle_drop = disconnect_release.saturating_mul(3);
+        let peer_idle_drop = Duration::from_millis(
+            config
+                .network
+                .disconnect_release_ms
+                .saturating_mul(10)
+                .max(15_000),
+        );
 
         let capture_epoch = Arc::new(AtomicU64::new(0));
         let shared_bounds = Arc::new(Mutex::new(initial_bounds));
@@ -192,6 +198,18 @@ impl ReceiverRuntime {
                 while rx_running.load(Ordering::Acquire) {
                     if let Some(new_bounds) = rx_bounds.lock().ok().and_then(|mut g| g.take()) {
                         sink.set_monitor_bounds(new_bounds);
+                        let snap = {
+                            let mut st = rx_status.lock().unwrap();
+                            let prefix = if st.virtual_monitor_active {
+                                "Extended Virtual"
+                            } else {
+                                "Display"
+                            };
+                            st.capture_monitor_label =
+                                format!("{prefix} ({}x{})", new_bounds.width, new_bounds.height);
+                            st.clone()
+                        };
+                        rx_observer(&snap);
                     }
 
                     match main_socket.recv_from(&mut buf) {

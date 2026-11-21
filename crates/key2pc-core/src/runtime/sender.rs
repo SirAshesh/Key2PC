@@ -442,8 +442,13 @@ fn spawn_sender_tx_thread(
             boost_current_thread_priority(false);
             let retransmit_interval = Duration::from_millis(config.network.retransmit_ms);
             let heartbeat_interval = Duration::from_millis(config.network.heartbeat_ms);
-            let disconnect_timeout =
-                Duration::from_millis(config.network.disconnect_release_ms.saturating_mul(3));
+            let disconnect_timeout = Duration::from_millis(
+                config
+                    .network
+                    .disconnect_release_ms
+                    .saturating_mul(10)
+                    .max(15_000),
+            );
             let redundant_sends = config.network.redundant_sends.max(1);
 
             let mut held_keys = PressedKeySet::default();
@@ -452,6 +457,7 @@ fn spawn_sender_tx_thread(
             let mut last_ping_at = Instant::now() - Duration::from_secs(5);
             let mut session_started = false;
             let mut is_active = config.sender.start_active;
+            let mut last_known_peer: Option<SocketAddr> = None;
 
             while running.load(Ordering::Acquire) {
                 let wait_timeout = {
@@ -550,12 +556,13 @@ fn spawn_sender_tx_thread(
                 }
 
                 if let Some(peer) = peer_opt {
+                    last_known_peer = Some(peer);
                     for raw in due_packets {
                         let _ = socket.send_to(&raw, peer);
                     }
 
                     if !session_started
-                        && now.saturating_duration_since(last_ping_at) >= Duration::from_millis(350)
+                        && now.saturating_duration_since(last_ping_at) >= Duration::from_millis(250)
                     {
                         last_ping_at = now;
                         let seq = next_seq.fetch_add(1, Ordering::Relaxed);
@@ -563,7 +570,7 @@ fn spawn_sender_tx_thread(
                         let _ = socket.send_to(&pkt, peer);
                         session_started = true;
                     } else if now.saturating_duration_since(last_ping_at)
-                        >= Duration::from_millis(500)
+                        >= Duration::from_millis(250)
                     {
                         last_ping_at = now;
                         let seq = next_seq.fetch_add(1, Ordering::Relaxed);
@@ -581,11 +588,21 @@ fn spawn_sender_tx_thread(
                         let _ = socket.send_to(&pkt, peer);
                     }
                 } else if now.saturating_duration_since(last_discover_at)
-                    >= Duration::from_millis(800)
+                    >= Duration::from_millis(450)
                 {
                     last_discover_at = now;
                     let seq = next_seq.fetch_add(1, Ordering::Relaxed);
                     let req = Packet::discover_req(seq, now_us).encode(&auth_key);
+                    if let Some(last_peer) = last_known_peer {
+                        let _ = socket.send_to(
+                            &req,
+                            SocketAddr::new(last_peer.ip(), config.network.discovery_port),
+                        );
+                        let _ = socket.send_to(
+                            &req,
+                            SocketAddr::new(last_peer.ip(), config.network.port),
+                        );
+                    }
                     for bcast in enumerate_broadcast_targets(config.network.discovery_port) {
                         let _ = socket.send_to(&req, bcast);
                     }
