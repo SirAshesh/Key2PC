@@ -14,6 +14,7 @@ const TRAY_GUID: u128 = 0x6B65_7932_7063_7472_6179_0000_0000_0001;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     ToggleForwarding,
+    ToggleDisplay,
     ReleaseAll,
     ReloadConfig,
     Exit,
@@ -23,6 +24,7 @@ pub struct TrayController {
     tray_icon: TrayIcon,
     status_item: MenuItem,
     toggle_item: CheckMenuItem,
+    display_item: CheckMenuItem,
     release_item: MenuItem,
     show_latency: bool,
     current_palette: IconPalette,
@@ -36,17 +38,20 @@ impl TrayController {
     ) -> Result<(Self, Receiver<TrayAction>)> {
         let menu = Menu::new();
         let status_item = MenuItem::new("Key2PC", false, None);
+        let is_sender_ok = initial_status.role == Role::Sender && initial_status.error_message.is_none();
         let toggle_item = CheckMenuItem::new(
             format_toggle_label(initial_status),
-            initial_status.role == Role::Sender && initial_status.error_message.is_none(),
+            is_sender_ok,
             initial_status.active,
             None,
         );
-        let release_item = MenuItem::new(
-            "Release All Remote Keys",
-            initial_status.role == Role::Sender && initial_status.error_message.is_none(),
+        let display_item = CheckMenuItem::new(
+            format_display_label(initial_status),
+            is_sender_ok && initial_status.display_enabled,
+            initial_status.display_visible,
             None,
         );
+        let release_item = MenuItem::new("Release All Remote Keys", is_sender_ok, None);
         let reload_item = MenuItem::new("Reload config.json", true, None);
         let exit_item = MenuItem::new("Exit", true, None);
 
@@ -55,6 +60,8 @@ impl TrayController {
         menu.append(&PredefinedMenuItem::separator())
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
         menu.append(&toggle_item)
+            .map_err(|err| Key2PcError::Tray(err.to_string()))?;
+        menu.append(&display_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
         menu.append(&release_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
@@ -79,6 +86,7 @@ impl TrayController {
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
 
         let toggle_id: MenuId = toggle_item.id().clone();
+        let display_id: MenuId = display_item.id().clone();
         let release_id: MenuId = release_item.id().clone();
         let reload_id: MenuId = reload_item.id().clone();
         let exit_id: MenuId = exit_item.id().clone();
@@ -87,6 +95,8 @@ impl TrayController {
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             let action = if event.id == toggle_id {
                 Some(TrayAction::ToggleForwarding)
+            } else if event.id == display_id {
+                Some(TrayAction::ToggleDisplay)
             } else if event.id == release_id {
                 Some(TrayAction::ReleaseAll)
             } else if event.id == reload_id {
@@ -106,6 +116,7 @@ impl TrayController {
             tray_icon,
             status_item,
             toggle_item,
+            display_item,
             release_item,
             show_latency,
             current_palette: palette,
@@ -133,6 +144,12 @@ impl TrayController {
         self.release_item.set_enabled(is_sender_ok);
         self.toggle_item.set_checked(is_sender_ok && status.active);
         self.toggle_item.set_text(format_toggle_label(status));
+
+        self.display_item
+            .set_enabled(is_sender_ok && status.display_enabled);
+        self.display_item
+            .set_checked(is_sender_ok && status.display_visible);
+        self.display_item.set_text(format_display_label(status));
     }
 }
 
@@ -141,6 +158,14 @@ fn format_toggle_label(status: &ServiceStatus) -> String {
         "Forward Keyboard to PC".to_string()
     } else {
         format!("Forward Keyboard to PC ({})", status.hotkey_label)
+    }
+}
+
+fn format_display_label(status: &ServiceStatus) -> String {
+    if status.display_hotkey_label.is_empty() {
+        "Show Second Screen".to_string()
+    } else {
+        format!("Show Second Screen ({})", status.display_hotkey_label)
     }
 }
 

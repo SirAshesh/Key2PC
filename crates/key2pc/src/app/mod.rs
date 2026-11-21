@@ -65,6 +65,7 @@ pub fn run() -> i32 {
         while let Ok(action) = action_rx.try_recv() {
             match action {
                 TrayAction::ToggleForwarding => host.toggle_active(),
+                TrayAction::ToggleDisplay => host.toggle_display(),
                 TrayAction::ReleaseAll => host.release_all(),
                 TrayAction::ReloadConfig => host.start_or_reload(),
                 TrayAction::Exit => unsafe {

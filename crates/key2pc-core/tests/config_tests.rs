@@ -13,7 +13,7 @@ fn parses_role_aliases_and_validates_defaults() {
 }
 
 #[test]
-fn rejects_invalid_port_and_empty_secret() {
+fn rejects_invalid_network_and_display_settings() {
     let mut cfg = AppConfig::default();
     cfg.network.port = 0;
     assert!(cfg.validate().is_err());
@@ -23,8 +23,16 @@ fn rejects_invalid_port_and_empty_secret() {
     assert!(cfg2.validate().is_err());
 
     let mut cfg3 = AppConfig::default();
-    cfg3.network.redundant_sends = 0;
+    cfg3.display.width = 1921;
     assert!(cfg3.validate().is_err());
+
+    let mut cfg4 = AppConfig::default();
+    cfg4.display.fps = 5;
+    assert!(cfg4.validate().is_err());
+
+    let mut cfg5 = AppConfig::default();
+    cfg5.display.monitor = "invalid".to_string();
+    assert!(cfg5.validate().is_err());
 }
 
 #[test]
@@ -40,11 +48,13 @@ fn json_file_store_creates_saves_and_reloads_config() {
     let mut updated = created;
     updated.role = Role::Receiver;
     updated.network.port = 24900;
+    updated.display.fps = 60;
     store.save(&updated).unwrap();
 
     let reloaded = store.load().unwrap();
     assert_eq!(reloaded.role, Role::Receiver);
     assert_eq!(reloaded.network.port, 24900);
+    assert_eq!(reloaded.display.fps, 60);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

@@ -5,29 +5,38 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::config::{AppConfig, Role};
+use crate::display::{enumerate_monitors, select_monitor_index};
 use crate::error::{Key2PcError, Result};
-use crate::input::{boost_current_thread_priority, InputSink, WinKeyboardInjector};
+use crate::input::{boost_current_thread_priority, DesktopBounds, InputSink, WinInputInjector};
 use crate::network::{create_tuned_udp_socket, UdpSocketConfig};
 use crate::protocol::{derive_auth_key, Packet, PacketKind, SequenceWindow};
 use crate::runtime::is_timeout_error;
 use crate::runtime::status::{ManagedService, ServiceStatus, StatusObserver};
+use crate::runtime::video_host::VideoStreamerHost;
 
 pub struct ReceiverRuntime {
     running: Arc<AtomicBool>,
     status: Arc<Mutex<ServiceStatus>>,
     rx_handle: Option<JoinHandle<()>>,
     discovery_handle: Option<JoinHandle<()>>,
+    video_host: Option<VideoStreamerHost>,
 }
 
 impl ReceiverRuntime {
     pub fn start(config: &AppConfig, observer: StatusObserver) -> Result<Self> {
-        let sink = Box::new(WinKeyboardInjector::new(config.receiver.prefer_scancode));
+        let mut sink = Box::new(WinInputInjector::new(config.receiver.prefer_scancode));
+        if let Ok(monitors) = enumerate_monitors() {
+            if !monitors.is_empty() {
+                let idx = select_monitor_index(&config.display.monitor, monitors.len());
+                sink.set_monitor_bounds(monitors[idx].bounds);
+            }
+        }
         Self::start_with_sink(config, sink, observer)
     }
 
     pub fn start_with_sink(
         config: &AppConfig,
-        mut sink: Box<dyn InputSink>,
+        sink: Box<dyn InputSink>,
         observer: StatusObserver,
     ) -> Result<Self> {
         config.validate()?;
@@ -70,6 +79,9 @@ impl ReceiverRuntime {
             peer_address: None,
             rtt_ms: None,
             hotkey_label: String::new(),
+            display_enabled: config.display.enabled,
+            display_visible: false,
+            display_hotkey_label: String::new(),
             error_message: None,
         };
         observer(&initial_status);
@@ -78,8 +90,22 @@ impl ReceiverRuntime {
         let status = Arc::new(Mutex::new(initial_status));
         let auth_key = derive_auth_key(&config.network.shared_secret);
         let listen_port = main_socket.local_addr()?.port();
+        let video_port = config.display.video_port;
         let disconnect_release = Duration::from_millis(config.network.disconnect_release_ms);
         let peer_idle_drop = disconnect_release.saturating_mul(3);
+
+        let shared_bounds = Arc::new(Mutex::new(None::<DesktopBounds>));
+        let video_host = if config.display.enabled {
+            let bounds_slot = Arc::clone(&shared_bounds);
+            let bounds_cb: Arc<dyn Fn(DesktopBounds) + Send + Sync> = Arc::new(move |bounds| {
+                if let Ok(mut guard) = bounds_slot.lock() {
+                    *guard = Some(bounds);
+                }
+            });
+            Some(VideoStreamerHost::start(config, bounds_cb)?)
+        } else {
+            None
+        };
 
         let discovery_handle = discovery_socket.and_then(|disc_sock| {
             let disc_running = Arc::clone(&running);
@@ -103,6 +129,7 @@ impl ReceiverRuntime {
                                         pkt.seq,
                                         pkt.timestamp_us,
                                         listen_port,
+                                        video_port,
                                     )
                                     .encode(&auth_key);
                                     let _ = disc_sock.send_to(&resp, src);
@@ -119,10 +146,12 @@ impl ReceiverRuntime {
         let rx_running = Arc::clone(&running);
         let rx_status = Arc::clone(&status);
         let rx_observer = Arc::clone(&observer);
+        let rx_bounds = Arc::clone(&shared_bounds);
         let rx_handle = thread::Builder::new()
             .name("key2pc-receiver-rx".to_string())
             .spawn(move || {
                 boost_current_thread_priority(true);
+                let mut sink = sink;
                 let mut buf = [0u8; 128];
                 let mut seq_window = SequenceWindow::default();
                 let mut active_peer: Option<SocketAddr> = None;
@@ -130,6 +159,10 @@ impl ReceiverRuntime {
                 let mut last_key_event_at: Option<Instant> = None;
 
                 while rx_running.load(Ordering::Acquire) {
+                    if let Some(new_bounds) = rx_bounds.lock().ok().and_then(|mut g| g.take()) {
+                        sink.set_monitor_bounds(new_bounds);
+                    }
+
                     match main_socket.recv_from(&mut buf) {
                         Ok((len, src)) => {
                             if let Some(allowed) = allowed_ip {
@@ -169,6 +202,20 @@ impl ReceiverRuntime {
                                         }
                                     }
                                 }
+                                PacketKind::MouseEvent => {
+                                    if let Ok(Some(mouse)) = pkt.as_mouse_event() {
+                                        if mouse.action.requires_reliable_ack() {
+                                            let ack = Packet::ack(pkt.seq, pkt.timestamp_us)
+                                                .encode(&auth_key);
+                                            let _ = main_socket.send_to(&ack, src);
+                                            if seq_window.accept(pkt.seq) {
+                                                let _ = sink.handle_mouse(mouse);
+                                            }
+                                        } else {
+                                            let _ = sink.handle_mouse(mouse);
+                                        }
+                                    }
+                                }
                                 PacketKind::ReleaseAll => {
                                     let ack =
                                         Packet::ack(pkt.seq, pkt.timestamp_us).encode(&auth_key);
@@ -203,6 +250,7 @@ impl ReceiverRuntime {
                                         pkt.seq,
                                         pkt.timestamp_us,
                                         listen_port,
+                                        video_port,
                                     )
                                     .encode(&auth_key);
                                     let _ = main_socket.send_to(&resp, src);
@@ -248,6 +296,7 @@ impl ReceiverRuntime {
             status,
             rx_handle: Some(rx_handle),
             discovery_handle,
+            video_host,
         })
     }
 }
@@ -255,6 +304,7 @@ impl ReceiverRuntime {
 impl ManagedService for ReceiverRuntime {
     fn toggle_active(&self) {}
     fn set_active(&self, _active: bool) {}
+    fn toggle_display(&self) {}
     fn release_all(&self) {}
 
     fn status(&self) -> ServiceStatus {
@@ -263,6 +313,9 @@ impl ManagedService for ReceiverRuntime {
 
     fn shutdown(&mut self) {
         self.running.store(false, Ordering::Release);
+        if let Some(mut vhost) = self.video_host.take() {
+            vhost.shutdown();
+        }
         if let Some(handle) = self.rx_handle.take() {
             let _ = handle.join();
         }

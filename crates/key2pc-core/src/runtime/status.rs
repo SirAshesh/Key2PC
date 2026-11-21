@@ -14,6 +14,9 @@ pub struct ServiceStatus {
     pub peer_address: Option<SocketAddr>,
     pub rtt_ms: Option<f32>,
     pub hotkey_label: String,
+    pub display_enabled: bool,
+    pub display_visible: bool,
+    pub display_hotkey_label: String,
     pub error_message: Option<String>,
 }
 
@@ -27,6 +30,9 @@ impl ServiceStatus {
             peer_address: None,
             rtt_ms: None,
             hotkey_label: String::new(),
+            display_enabled: false,
+            display_visible: false,
+            display_hotkey_label: String::new(),
             error_message: Some(message),
         }
     }
@@ -35,6 +41,7 @@ impl ServiceStatus {
 pub trait ManagedService: Send {
     fn toggle_active(&self);
     fn set_active(&self, active: bool);
+    fn toggle_display(&self);
     fn release_all(&self);
     fn status(&self) -> ServiceStatus;
     fn shutdown(&mut self);

@@ -1,47 +1,64 @@
 # Key2PC
 
-Key2PC lets you use your laptop keyboard to control a Windows PC wirelessly over the same local network with millisecond-level latency. It runs quietly in the Windows system tray with no GUI window and reads all settings from `config.json`.
+Key2PC turns your Windows laptop into a low-latency wireless keyboard, mouse, and second screen display for your Windows PC over the same local Wi-Fi or LAN connection. It runs in the Windows system tray, stores all settings in `config.json`, and supports hardware-accelerated 1080p 60fps video streaming.
 
 ## Features
 
-- Low-latency binary UDP protocol with minimal overhead
-- Keyed BLAKE3 packet authentication and fast ACK retransmission to prevent dropped or stuck keys
-- Automatic LAN discovery or direct IP targeting
-- Background Windows system tray icon showing connection state, active mode, and live RTT latency
-- Full configuration via `config.json` with live reload from the tray menu
+- Low-latency binary UDP keyboard and mouse forwarding with keyed BLAKE3 authentication
+- Fast ACK retransmission and automatic release protection to prevent dropped or stuck keys
+- Hardware-accelerated 1080p 60fps display streaming using DXGI Desktop Duplication, Direct3D 11, and Media Foundation H.264
+- Automatic secondary monitor selection when a second physical or virtual display is attached on the PC
+- Borderless fullscreen viewer mode (`F11`) on the laptop with automatic focus-based input control
+- Background Windows system tray icon with live connection status, RTT latency, and config reload
 
 ## Quick Start
 
-1. Download `key2pc.exe` (or `key2pc-windows-x86_64.zip`) from the Releases page, or build it from source.
-2. Put `key2pc.exe` and `config.json` in the same folder on both your laptop and your PC.
-3. On your PC, open `config.json`, change `"role"` to `"receiver"`, and launch `key2pc.exe`. Allow UDP access through Windows Defender Firewall if prompted.
-4. On your laptop, keep `"role": "sender"` and `"target_host": "auto"` (or set `"target_host"` to your PC's local IP address), then launch `key2pc.exe`.
-5. Make sure `"shared_secret"` under `"network"` is identical on both devices.
+1. Download `key2pc.exe` (or `key2pc-windows-x86_64.zip`) from the Releases page, or build from source.
+2. Put `key2pc.exe` and `config.json` in the same folder on both your PC and your laptop.
+3. On your PC, set `"role": "receiver"` in `config.json` and launch `key2pc.exe`. Allow access through Windows Defender Firewall when prompted.
+4. On your laptop, keep `"role": "sender"` and `"target_host": "auto"` (or enter your PC's local IP address), then launch `key2pc.exe`.
+5. Make sure `"shared_secret"` under `"network"` matches on both devices.
 
-## Usage
+## Using Your Laptop as an Extended Second Screen
 
-- Press `Ctrl+Alt+K` (or right-click the tray icon and click **Forward Keyboard to PC**) to switch keyboard input between your laptop and your PC.
-- When forwarding is active, the tray icon turns green and keystrokes go only to the PC. When inactive, the tray icon is blue and typing stays on your laptop.
-- Press `Ctrl+Alt+Esc` at any time to release all keys currently held on the PC.
-- After editing `config.json`, right-click the tray icon and choose **Reload config.json** to apply your changes without restarting.
-- To type into elevated administrator windows on the PC, run `key2pc.exe` as administrator on the PC.
+When `"display.enabled"` is `true` and `"display.monitor"` is `"auto"`:
+
+- If your PC already has a second monitor, an HDMI dummy plug, or an installed Windows Virtual Display Driver (such as Parsec VDD or Virtual Display Driver), Key2PC automatically streams that secondary monitor as an independent extended screen.
+- If your PC only has one monitor, Key2PC streams your primary monitor so you can still view and control the PC immediately.
+- Press `Ctrl+Alt+D` (or click **Show Second Screen** in the tray menu) to show or hide the viewer window on your laptop.
+- Press `F11` inside the viewer window to toggle fullscreen.
+
+## Controls
+
+- `Ctrl+Alt+K`: Toggle keyboard forwarding between your laptop and PC
+- `Ctrl+Alt+D`: Show or hide the Second Screen viewer window
+- `Ctrl+Alt+Esc`: Release all held keys and mouse buttons on the PC
+- `F11` (in viewer): Toggle borderless fullscreen
+- Clicking the viewer window automatically focuses keyboard and mouse input onto the PC when `"auto_forward_on_viewer_focus"` is `true`
 
 ## Configuration
 
 | Option | Description | Default |
 | --- | --- | --- |
 | `role` | `"sender"` on the laptop or `"receiver"` on the PC | `"sender"` |
-| `network.port` | UDP port used for keyboard traffic | `24800` |
+| `network.port` | UDP port for keyboard, mouse, and control packets | `24800` |
 | `network.target_host` | `"auto"` for LAN discovery, or your PC IP/hostname | `"auto"` |
-| `network.discovery_port` | UDP port used for automatic LAN discovery | `24801` |
+| `network.discovery_port` | UDP port for automatic LAN discovery | `24801` |
 | `network.shared_secret` | Shared authentication key that must match on both devices | `"key2pc-change-this-secret"` |
-| `network.retransmit_ms` | Fast retry interval when an ACK is not received | `3` |
-| `network.disconnect_release_ms` | Auto-release timeout on the PC if connection drops | `1500` |
-| `sender.start_active` | Start forwarding to the PC immediately on launch | `false` |
-| `sender.toggle_hotkey` | Hotkey combination to toggle laptop vs PC input | `Ctrl+Alt+K` |
-| `sender.release_all_hotkey` | Hotkey combination to release all remote keys | `Ctrl+Alt+Escape` |
+| `display.enabled` | Enable 1080p 60fps second screen streaming | `true` |
+| `display.video_port` | UDP port for streamed H.264 video frames | `24802` |
+| `display.monitor` | `"auto"` (prefers monitor 2) or monitor index such as `"0"` or `"1"` | `"auto"` |
+| `display.width` | Stream width in pixels | `1920` |
+| `display.height` | Stream height in pixels | `1080` |
+| `display.fps` | Target frame rate | `60` |
+| `display.bitrate_kbps` | Target H.264 bitrate in kbps | `16000` |
+| `display.fullscreen` | Open viewer directly in fullscreen | `false` |
+| `display.open_viewer_on_start` | Open the viewer window automatically on laptop launch | `true` |
+| `display.capture_mouse` | Forward mouse moves, clicks, and scroll wheel from viewer | `true` |
+| `display.auto_forward_on_viewer_focus` | Automatically forward keyboard when viewer window has focus | `true` |
+| `sender.start_active` | Start keyboard forwarding immediately on launch | `false` |
 | `receiver.allow_only_ip` | Optional laptop IP filter (`null` allows any authenticated peer) | `null` |
-| `receiver.prefer_scancode` | Send hardware scan-code flags for games that require them | `false` |
+| `receiver.prefer_scancode` | Send hardware scan-code flags for games | `false` |
 
 ## Building from Source
 

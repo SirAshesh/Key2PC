@@ -1,6 +1,8 @@
 mod receiver;
 mod sender;
 mod status;
+#[cfg(target_os = "windows")]
+mod video_host;
 
 use crate::config::{AppConfig, Role};
 use crate::error::Result;

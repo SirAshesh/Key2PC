@@ -13,6 +13,7 @@ pub struct HookProcessor {
     ignore_injected_keys: bool,
     toggle_hotkey: HotkeyBinding,
     release_all_hotkey: HotkeyBinding,
+    toggle_display_hotkey: Option<HotkeyBinding>,
     modifiers: ModifierState,
     local_held: PressedKeySet,
     remote_held: PressedKeySet,
@@ -33,6 +34,7 @@ impl HookProcessor {
             ignore_injected_keys: options.ignore_injected_keys,
             toggle_hotkey: options.toggle_hotkey,
             release_all_hotkey: options.release_all_hotkey,
+            toggle_display_hotkey: options.toggle_display_hotkey,
             modifiers: ModifierState::default(),
             local_held: PressedKeySet::default(),
             remote_held: PressedKeySet::default(),
@@ -72,6 +74,14 @@ impl HookProcessor {
             self.mark_suppressed_until_up(vk);
             self.request_release_all();
             return true;
+        }
+
+        if let Some(display_hotkey) = &self.toggle_display_hotkey {
+            if self.modifiers.matches(display_hotkey, vk, is_up) {
+                self.mark_suppressed_until_up(vk);
+                let _ = self.event_tx.try_send(HookEvent::ToggleDisplayRequested);
+                return true;
+            }
         }
 
         if self.consume_if_suppressed(vk, is_up) {

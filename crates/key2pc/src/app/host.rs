@@ -68,6 +68,12 @@ impl AppHost {
         }
     }
 
+    pub fn toggle_display(&self) {
+        if let Some(svc) = &self.service {
+            svc.toggle_display();
+        }
+    }
+
     pub fn release_all(&self) {
         if let Some(svc) = &self.service {
             svc.release_all();

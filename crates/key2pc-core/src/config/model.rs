@@ -90,6 +90,7 @@ pub struct SenderConfig {
     pub ignore_injected_keys: bool,
     pub toggle_hotkey: HotkeyConfig,
     pub release_all_hotkey: HotkeyConfig,
+    pub toggle_display_hotkey: HotkeyConfig,
 }
 
 impl Default for SenderConfig {
@@ -111,6 +112,13 @@ impl Default for SenderConfig {
                 win: false,
                 key: "Escape".to_string(),
             },
+            toggle_display_hotkey: HotkeyConfig {
+                ctrl: true,
+                alt: true,
+                shift: false,
+                win: false,
+                key: "D".to_string(),
+            },
         }
     }
 }
@@ -120,6 +128,40 @@ impl Default for SenderConfig {
 pub struct ReceiverConfig {
     pub allow_only_ip: Option<String>,
     pub prefer_scancode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DisplayConfig {
+    pub enabled: bool,
+    pub video_port: u16,
+    pub monitor: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+    pub fullscreen: bool,
+    pub open_viewer_on_start: bool,
+    pub capture_mouse: bool,
+    pub auto_forward_on_viewer_focus: bool,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            video_port: 24802,
+            monitor: "auto".to_string(),
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 16000,
+            fullscreen: false,
+            open_viewer_on_start: true,
+            capture_mouse: true,
+            auto_forward_on_viewer_focus: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,6 +187,7 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     pub sender: SenderConfig,
     pub receiver: ReceiverConfig,
+    pub display: DisplayConfig,
     pub tray: TrayConfig,
 }
 
@@ -157,6 +200,7 @@ impl Default for AppConfig {
             network: NetworkConfig::default(),
             sender: SenderConfig::default(),
             receiver: ReceiverConfig::default(),
+            display: DisplayConfig::default(),
             tray: TrayConfig::default(),
         }
     }
@@ -172,6 +216,11 @@ impl AppConfig {
         if self.network.discovery_port == 0 {
             return Err(Key2PcError::InvalidConfig(
                 "network.discovery_port must be between 1 and 65535".to_string(),
+            ));
+        }
+        if self.display.video_port == 0 {
+            return Err(Key2PcError::InvalidConfig(
+                "display.video_port must be between 1 and 65535".to_string(),
             ));
         }
         if self.network.shared_secret.trim().is_empty() {
@@ -199,6 +248,33 @@ impl AppConfig {
                 "network.redundant_sends must be between 1 and 4".to_string(),
             ));
         }
+        if self.display.width < 320
+            || self.display.height < 240
+            || !self.display.width.is_multiple_of(2)
+            || !self.display.height.is_multiple_of(2)
+        {
+            return Err(Key2PcError::InvalidConfig(
+                "display.width and display.height must be even integers >= 320x240".to_string(),
+            ));
+        }
+        if self.display.fps < 15 || self.display.fps > 240 {
+            return Err(Key2PcError::InvalidConfig(
+                "display.fps must be between 15 and 240".to_string(),
+            ));
+        }
+        if self.display.bitrate_kbps < 500 {
+            return Err(Key2PcError::InvalidConfig(
+                "display.bitrate_kbps must be >= 500".to_string(),
+            ));
+        }
+        let monitor_trimmed = self.display.monitor.trim();
+        if !monitor_trimmed.eq_ignore_ascii_case("auto") && monitor_trimmed.parse::<usize>().is_err()
+        {
+            return Err(Key2PcError::InvalidConfig(format!(
+                "display.monitor must be 'auto' or an index, got '{}'",
+                self.display.monitor
+            )));
+        }
         self.network.bind_ip.parse::<IpAddr>().map_err(|_| {
             Key2PcError::InvalidConfig(format!("Invalid network.bind_ip: {}", self.network.bind_ip))
         })?;
@@ -209,6 +285,7 @@ impl AppConfig {
         }
         self.sender.toggle_hotkey.to_binding()?;
         self.sender.release_all_hotkey.to_binding()?;
+        self.sender.toggle_display_hotkey.to_binding()?;
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 {
   "role": "sender",
-  "device_name": "Laptop-Keyboard",
+  "device_name": "Laptop-SecondScreen",
   "log_file": null,
   "network": {
     "bind_ip": "0.0.0.0",
@@ -31,11 +31,31 @@
       "shift": false,
       "win": false,
       "key": "Escape"
+    },
+    "toggle_display_hotkey": {
+      "ctrl": true,
+      "alt": true,
+      "shift": false,
+      "win": false,
+      "key": "D"
     }
   },
   "receiver": {
     "allow_only_ip": null,
     "prefer_scancode": false
+  },
+  "display": {
+    "enabled": true,
+    "video_port": 24802,
+    "monitor": "auto",
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "bitrate_kbps": 16000,
+    "fullscreen": false,
+    "open_viewer_on_start": true,
+    "capture_mouse": true,
+    "auto_forward_on_viewer_focus": true
   },
   "tray": {
     "show_tooltip_latency": true

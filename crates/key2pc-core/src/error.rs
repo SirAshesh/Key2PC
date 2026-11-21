@@ -8,6 +8,7 @@ pub enum Key2PcError {
     InvalidConfig(String),
     Protocol(String),
     Input(String),
+    Display(String),
     Tray(String),
 }
 
@@ -21,6 +22,7 @@ impl fmt::Display for Key2PcError {
             Self::InvalidConfig(msg) => write!(f, "Configuration error: {msg}"),
             Self::Protocol(msg) => write!(f, "Protocol error: {msg}"),
             Self::Input(msg) => write!(f, "Input error: {msg}"),
+            Self::Display(msg) => write!(f, "Display error: {msg}"),
             Self::Tray(msg) => write!(f, "Tray error: {msg}"),
         }
     }
@@ -31,7 +33,11 @@ impl Error for Key2PcError {
         match self {
             Self::Io(err) => Some(err),
             Self::Json(err) => Some(err),
-            Self::InvalidConfig(_) | Self::Protocol(_) | Self::Input(_) | Self::Tray(_) => None,
+            Self::InvalidConfig(_)
+            | Self::Protocol(_)
+            | Self::Input(_)
+            | Self::Display(_)
+            | Self::Tray(_) => None,
         }
     }
 }
@@ -45,5 +51,12 @@ impl From<std::io::Error> for Key2PcError {
 impl From<serde_json::Error> for Key2PcError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl From<windows::core::Error> for Key2PcError {
+    fn from(value: windows::core::Error) -> Self {
+        Self::Display(value.to_string())
     }
 }

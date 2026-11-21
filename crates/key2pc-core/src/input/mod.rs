@@ -10,10 +10,15 @@ pub use key_map::{
     VK_RSHIFT, VK_RWIN, VK_SHIFT,
 };
 pub use processor::HookProcessor;
-pub use types::{HookControl, HookEvent, HookOptions, InputSink, PressedKey, PressedKeySet, KEY2PC_EXTRA_INFO};
+pub use types::{
+    DesktopBounds, HookControl, HookEvent, HookOptions, InputSink, PressedKey, PressedKeySet,
+    KEY2PC_EXTRA_INFO,
+};
 
 #[cfg(target_os = "windows")]
-pub use windows::{boost_current_thread_priority, WinKeyboardHook, WinKeyboardInjector};
+pub use windows::{
+    boost_current_thread_priority, WinInputInjector, WinKeyboardHook, WinKeyboardInjector,
+};
 
 #[cfg(not(target_os = "windows"))]
 pub fn boost_current_thread_priority(_time_critical: bool) {}

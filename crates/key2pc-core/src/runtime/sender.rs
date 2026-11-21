@@ -18,6 +18,7 @@ use crate::network::{
 };
 use crate::protocol::{derive_auth_key, KeyAction, Packet, PacketKind};
 use crate::runtime::status::{ManagedService, ServiceStatus, StatusObserver};
+use crate::runtime::video_host::VideoViewerHost;
 use crate::runtime::{is_timeout_error, update_rtt_ewma};
 
 struct SenderSharedState {
@@ -30,7 +31,8 @@ struct SenderSharedState {
 
 pub struct SenderRuntime {
     running: Arc<AtomicBool>,
-    hook: Option<WinKeyboardHook>,
+    hook: Option<Arc<WinKeyboardHook>>,
+    video_host: Option<Arc<Mutex<VideoViewerHost>>>,
     shared: Arc<Mutex<SenderSharedState>>,
     status: Arc<Mutex<ServiceStatus>>,
     observer: StatusObserver,
@@ -44,7 +46,9 @@ impl SenderRuntime {
         config.validate()?;
         let toggle_hotkey = config.sender.toggle_hotkey.to_binding()?;
         let release_hotkey = config.sender.release_all_hotkey.to_binding()?;
+        let display_hotkey = config.sender.toggle_display_hotkey.to_binding()?;
         let hotkey_label = toggle_hotkey.display_label();
+        let display_hotkey_label = display_hotkey.display_label();
 
         let bind_ip: IpAddr = config.network.bind_ip.parse().map_err(|_| {
             Key2PcError::InvalidConfig(format!("Invalid bind_ip: {}", config.network.bind_ip))
@@ -66,8 +70,17 @@ impl SenderRuntime {
             ignore_injected_keys: config.sender.ignore_injected_keys,
             toggle_hotkey,
             release_all_hotkey: release_hotkey,
+            toggle_display_hotkey: if config.display.enabled {
+                Some(display_hotkey)
+            } else {
+                None
+            },
         };
         let (hook, hook_rx) = WinKeyboardHook::start(hook_options)?;
+        let hook = Arc::new(hook);
+
+        let initial_video_peer =
+            resolved_target.map(|addr| SocketAddr::new(addr.ip(), config.display.video_port));
 
         let initial_status = ServiceStatus {
             role: Role::Sender,
@@ -77,11 +90,43 @@ impl SenderRuntime {
             peer_address: resolved_target,
             rtt_ms: None,
             hotkey_label,
+            display_enabled: config.display.enabled,
+            display_visible: config.display.enabled && config.display.open_viewer_on_start,
+            display_hotkey_label,
             error_message: None,
         };
         observer(&initial_status);
 
         let status = Arc::new(Mutex::new(initial_status));
+
+        let video_host = if config.display.enabled {
+            let focus_hook = Arc::clone(&hook);
+            let on_focus: Arc<dyn Fn(bool) + Send + Sync> = Arc::new(move |active| {
+                focus_hook.set_active(active);
+            });
+            let vis_status = Arc::clone(&status);
+            let vis_observer = Arc::clone(&observer);
+            let on_vis: Arc<dyn Fn(bool) + Send + Sync> = Arc::new(move |visible| {
+                let snap = {
+                    let mut st = vis_status.lock().unwrap();
+                    st.display_visible = visible;
+                    st.clone()
+                };
+                vis_observer(&snap);
+            });
+
+            let host = VideoViewerHost::start(
+                config,
+                initial_video_peer,
+                hook.event_sender(),
+                on_focus,
+                on_vis,
+            )?;
+            Some(Arc::new(Mutex::new(host)))
+        } else {
+            None
+        };
+
         let shared = Arc::new(Mutex::new(SenderSharedState {
             peer_address: resolved_target,
             connected: false,
@@ -100,10 +145,12 @@ impl SenderRuntime {
             Arc::clone(&shared),
             Arc::clone(&status),
             Arc::clone(&observer),
+            video_host.clone(),
             Arc::clone(&next_seq),
             auth_key,
             clock_epoch,
             config.network.port,
+            config.display.video_port,
         )?;
 
         let tx_handle = spawn_sender_tx_thread(
@@ -113,6 +160,7 @@ impl SenderRuntime {
             Arc::clone(&shared),
             Arc::clone(&status),
             Arc::clone(&observer),
+            video_host.clone(),
             next_seq,
             auth_key,
             clock_epoch,
@@ -123,6 +171,7 @@ impl SenderRuntime {
         Ok(Self {
             running,
             hook: Some(hook),
+            video_host,
             shared,
             status,
             observer,
@@ -150,6 +199,14 @@ impl ManagedService for SenderRuntime {
         }
     }
 
+    fn toggle_display(&self) {
+        if let Some(host) = &self.video_host {
+            if let Ok(guard) = host.lock() {
+                guard.toggle_visible();
+            }
+        }
+    }
+
     fn release_all(&self) {
         if let Some(hook) = &self.hook {
             hook.release_all_remote();
@@ -162,11 +219,18 @@ impl ManagedService for SenderRuntime {
 
     fn shutdown(&mut self) {
         self.running.store(false, Ordering::Release);
+        if let Some(host) = self.video_host.take() {
+            if let Ok(mut guard) = host.lock() {
+                guard.shutdown();
+            }
+        }
         if let Some(hook) = &self.hook {
             hook.release_all_remote();
         }
-        if let Some(mut hook) = self.hook.take() {
-            hook.shutdown();
+        if let Some(hook) = self.hook.take() {
+            if let Ok(mut owned) = Arc::try_unwrap(hook) {
+                owned.shutdown();
+            }
         }
         if let Some(handle) = self.tx_handle.take() {
             let _ = handle.join();
@@ -180,6 +244,7 @@ impl ManagedService for SenderRuntime {
         let mut snap = self.status.lock().unwrap().clone();
         snap.active = false;
         snap.connected = false;
+        snap.display_visible = false;
         (self.observer)(&snap);
     }
 }
@@ -197,10 +262,12 @@ fn spawn_sender_rx_thread(
     shared: Arc<Mutex<SenderSharedState>>,
     status: Arc<Mutex<ServiceStatus>>,
     observer: StatusObserver,
+    video_host: Option<Arc<Mutex<VideoViewerHost>>>,
     next_seq: Arc<AtomicU64>,
     auth_key: [u8; 32],
     clock_epoch: Instant,
     default_port: u16,
+    default_video_port: u16,
 ) -> Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("key2pc-sender-rx".to_string())
@@ -218,6 +285,7 @@ fn spawn_sender_rx_thread(
                         let now_us = clock_epoch.elapsed().as_micros() as u64;
                         let mut state_changed = false;
                         let mut rtt_updated = false;
+                        let mut discovered_video_peer: Option<SocketAddr> = None;
 
                         let snapshot_opt = {
                             let mut guard = shared.lock().unwrap();
@@ -252,7 +320,14 @@ fn spawn_sender_rx_thread(
                                 PacketKind::DiscoverResp => {
                                     let target_port =
                                         if pkt.vk != 0 { pkt.vk } else { default_port };
+                                    let video_port = if pkt.scan_code != 0 {
+                                        pkt.scan_code
+                                    } else {
+                                        default_video_port
+                                    };
                                     let peer = SocketAddr::new(src.ip(), target_port);
+                                    discovered_video_peer =
+                                        Some(SocketAddr::new(src.ip(), video_port));
                                     if guard.peer_address != Some(peer) || !guard.connected {
                                         guard.peer_address = Some(peer);
                                         guard.last_rx_at = Some(now);
@@ -277,6 +352,14 @@ fn spawn_sender_rx_thread(
                                 None
                             }
                         };
+
+                        if let Some(vpeer) = discovered_video_peer {
+                            if let Some(host) = &video_host {
+                                if let Ok(guard) = host.lock() {
+                                    guard.set_peer_video_addr(Some(vpeer));
+                                }
+                            }
+                        }
 
                         if let Some((connected, peer_address, rtt_ms)) = snapshot_opt {
                             let snap = {
@@ -307,6 +390,7 @@ fn spawn_sender_tx_thread(
     shared: Arc<Mutex<SenderSharedState>>,
     status: Arc<Mutex<ServiceStatus>>,
     observer: StatusObserver,
+    video_host: Option<Arc<Mutex<VideoViewerHost>>>,
     next_seq: Arc<AtomicU64>,
     auth_key: [u8; 32],
     clock_epoch: Instant,
@@ -348,6 +432,7 @@ fn spawn_sender_tx_thread(
                             &shared,
                             &status,
                             &observer,
+                            &video_host,
                             &next_seq,
                             &auth_key,
                             clock_epoch,
@@ -362,6 +447,7 @@ fn spawn_sender_tx_thread(
                                 &shared,
                                 &status,
                                 &observer,
+                                &video_host,
                                 &next_seq,
                                 &auth_key,
                                 clock_epoch,
@@ -405,6 +491,13 @@ fn spawn_sender_tx_thread(
 
                 if dropped_connection {
                     session_started = false;
+                    if discovery_only {
+                        if let Some(host) = &video_host {
+                            if let Ok(guard) = host.lock() {
+                                guard.set_peer_video_addr(None);
+                            }
+                        }
+                    }
                     let snap = {
                         let mut st = status.lock().unwrap();
                         st.connected = false;
@@ -483,6 +576,7 @@ fn process_hook_event(
     shared: &Arc<Mutex<SenderSharedState>>,
     status: &Arc<Mutex<ServiceStatus>>,
     observer: &StatusObserver,
+    video_host: &Option<Arc<Mutex<VideoViewerHost>>>,
     next_seq: &Arc<AtomicU64>,
     auth_key: &[u8; 32],
     clock_epoch: Instant,
@@ -516,6 +610,19 @@ fn process_hook_event(
             let mut guard = shared.lock().unwrap();
             guard.retransmit.push(seq, raw, now);
         }
+        HookEvent::Mouse(mouse_ev) => {
+            let peer = { shared.lock().unwrap().peer_address };
+            let Some(peer_addr) = peer else {
+                return;
+            };
+            let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+            let raw = Packet::mouse_event(seq, now_us, mouse_ev).encode(auth_key);
+            let _ = socket.send_to(&raw, peer_addr);
+            if mouse_ev.action.requires_reliable_ack() {
+                let mut guard = shared.lock().unwrap();
+                guard.retransmit.push(seq, raw, now);
+            }
+        }
         HookEvent::ReleaseAllRequested => {
             held_keys.clear();
             let peer = {
@@ -538,6 +645,13 @@ fn process_hook_event(
                 st.clone()
             };
             observer(&snap);
+        }
+        HookEvent::ToggleDisplayRequested => {
+            if let Some(host) = video_host {
+                if let Ok(guard) = host.lock() {
+                    guard.toggle_visible();
+                }
+            }
         }
     }
 }

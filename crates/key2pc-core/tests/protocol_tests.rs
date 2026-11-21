@@ -1,4 +1,7 @@
-use key2pc_core::protocol::{derive_auth_key, KeyAction, KeyEvent, Packet, PacketKind, SequenceWindow};
+use key2pc_core::protocol::{
+    derive_auth_key, KeyAction, KeyEvent, MouseAction, MouseEvent, Packet, PacketKind,
+    SequenceWindow,
+};
 
 #[test]
 fn encodes_decodes_and_rejects_tampered_packets() {
@@ -21,6 +24,23 @@ fn encodes_decodes_and_rejects_tampered_packets() {
 
     raw[20] ^= 0x01;
     assert!(Packet::decode(&raw, &key).is_err());
+}
+
+#[test]
+fn encodes_and_decodes_mouse_events_in_44_byte_packet() {
+    let key = derive_auth_key("mouse-secret");
+    let mouse = MouseEvent {
+        action: MouseAction::Wheel,
+        norm_x: 32768,
+        norm_y: 16384,
+        wheel_delta: -120,
+    };
+    let pkt = Packet::mouse_event(99, 555_000, mouse);
+    let decoded = Packet::decode(&pkt.encode(&key), &key).unwrap();
+    assert_eq!(decoded.kind, PacketKind::MouseEvent);
+    assert_eq!(decoded.as_mouse_event().unwrap(), Some(mouse));
+    assert!(MouseAction::LeftDown.requires_reliable_ack());
+    assert!(!MouseAction::Move.requires_reliable_ack());
 }
 
 #[test]

@@ -3,8 +3,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use key2pc_core::input::{
-    HookEvent, HookOptions, HookProcessor, HotkeyBinding, PressedKey, PressedKeySet, VK_LCONTROL,
-    VK_LMENU,
+    DesktopBounds, HookEvent, HookOptions, HookProcessor, HotkeyBinding, PressedKey, PressedKeySet,
+    VK_LCONTROL, VK_LMENU,
 };
 use key2pc_core::protocol::{KeyAction, KeyEvent};
 
@@ -18,6 +18,7 @@ fn toggle_hotkey_releases_local_modifiers_and_suppresses_orphaned_key_ups() {
             ignore_injected_keys: true,
             toggle_hotkey: HotkeyBinding::new(true, true, false, false, b'K' as u16),
             release_all_hotkey: HotkeyBinding::new(true, true, false, false, 0x1B),
+            toggle_display_hotkey: Some(HotkeyBinding::new(true, true, false, false, b'D' as u16)),
         },
         shared,
         tx,
@@ -70,4 +71,19 @@ fn pressed_key_set_deduplicates_repeat_presses() {
     assert_eq!(set.len(), 1);
     set.track(key, true);
     assert!(set.is_empty());
+}
+
+#[test]
+fn desktop_bounds_maps_extended_monitor_coordinates() {
+    let virtual_desktop = DesktopBounds::new(-1920, 0, 3840, 1080);
+    let left_monitor = DesktopBounds::new(-1920, 0, 1920, 1080);
+    let right_monitor = DesktopBounds::new(0, 0, 1920, 1080);
+
+    let (lx, ly) = left_monitor.map_normalized_to_virtual(0, 32767, virtual_desktop);
+    assert_eq!(lx, 0);
+    assert!((ly - 32768).abs() <= 64);
+
+    let (rx, ry) = right_monitor.map_normalized_to_virtual(65535, 65535, virtual_desktop);
+    assert_eq!(rx, 65535);
+    assert_eq!(ry, 65535);
 }
