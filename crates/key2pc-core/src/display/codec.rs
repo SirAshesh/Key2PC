@@ -9,20 +9,20 @@ use windows::core::{Interface, GUID};
 use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
 use windows::Win32::Media::MediaFoundation::{
     eAVEncCommonRateControlMode_CBR, eAVEncCommonRateControlMode_LowDelayVBR,
-    eAVEncH264VProfile_Main, ICodecAPI, IMFActivate, IMFMediaEvent, IMFMediaEventGenerator,
-    IMFMediaType, IMFSample, IMFTransform, MEError, MFCreateMediaType, MFCreateMemoryBuffer,
-    MFCreateSample, MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264,
-    MFVideoFormat_NV12, CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
-    CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, METransformHaveOutput,
-    METransformNeedInput, MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER,
-    MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
-    MFSampleExtension_CleanPoint, MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE,
+    eAVEncH264VProfile_Main, CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
+    CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMFActivate,
+    IMFMediaEvent, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform, MEError,
+    METransformHaveOutput, METransformNeedInput, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFMediaType_Video, MFSampleExtension_CleanPoint, MFShutdown, MFStartup,
+    MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12, MFT_CATEGORY_VIDEO_DECODER,
+    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT, MF_E_NO_EVENTS_AVAILABLE,
     MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY,
     MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE,
-    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC,
+    MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
@@ -42,7 +42,9 @@ impl MfSessionGuard {
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         let com_initialized = hr == S_OK || hr == S_FALSE;
         if !com_initialized && hr != RPC_E_CHANGED_MODE {
-            return Err(Key2PcError::Display(format!("CoInitializeEx failed: {hr:?}")));
+            return Err(Key2PcError::Display(format!(
+                "CoInitializeEx failed: {hr:?}"
+            )));
         }
         unsafe { MFStartup(MF_VERSION, 0) }
             .map_err(|err| Key2PcError::Display(format!("MFStartup failed: {err}")))?;
@@ -107,7 +109,11 @@ fn build_video_media_type(
     Ok(media_type)
 }
 
-fn create_sample_from_bytes(bytes: &[u8], pts_100ns: i64, duration_100ns: i64) -> Result<IMFSample> {
+fn create_sample_from_bytes(
+    bytes: &[u8],
+    pts_100ns: i64,
+    duration_100ns: i64,
+) -> Result<IMFSample> {
     let sample = unsafe { MFCreateSample() }
         .map_err(|err| Key2PcError::Display(format!("MFCreateSample failed: {err}")))?;
     let buffer = unsafe { MFCreateMemoryBuffer(bytes.len() as u32) }
@@ -336,7 +342,8 @@ impl MfH264Encoder {
         }
 
         let out_info = unsafe { transform.GetOutputStreamInfo(0)? };
-        let provides_samples = (out_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
+        let provides_samples =
+            (out_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
         let output_buf_size = out_info.cbSize.max(width * height * 2).max(262_144);
         Ok((transform, is_async, provides_samples, output_buf_size))
     }
@@ -349,8 +356,9 @@ impl MfH264Encoder {
     }
 
     fn extract_encoded_packet(&self, sample: &IMFSample) -> Result<EncodedFrame> {
-        let buffer = unsafe { sample.ConvertToContiguousBuffer() }
-            .map_err(|err| Key2PcError::Display(format!("ConvertToContiguousBuffer failed: {err}")))?;
+        let buffer = unsafe { sample.ConvertToContiguousBuffer() }.map_err(|err| {
+            Key2PcError::Display(format!("ConvertToContiguousBuffer failed: {err}"))
+        })?;
         let mut ptr: *mut u8 = ptr::null_mut();
         let mut len = 0u32;
         unsafe { buffer.Lock(&mut ptr, None, Some(&mut len)) }
@@ -358,7 +366,8 @@ impl MfH264Encoder {
         let data = unsafe { slice::from_raw_parts(ptr, len as usize) }.to_vec();
         let _ = unsafe { buffer.Unlock() };
 
-        let clean_point = unsafe { sample.GetUINT32(&MFSampleExtension_CleanPoint) }.unwrap_or(0) != 0;
+        let clean_point =
+            unsafe { sample.GetUINT32(&MFSampleExtension_CleanPoint) }.unwrap_or(0) != 0;
         let has_idr = clean_point || contains_h264_idr(&data);
 
         Ok(EncodedFrame {
@@ -521,10 +530,11 @@ impl MfH264Decoder {
         }
 
         let out_info = unsafe { transform.GetOutputStreamInfo(0)? };
-        let provides_samples = (out_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
+        let provides_samples =
+            (out_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
         let output_buf_size = out_info
             .cbSize
-            .max(width.max(1920) * height.max(1088) * 2)
+            .max(width.max(2560) * height.max(1600) * 2)
             .max(4_194_304);
         let event_gen = if is_async {
             transform.cast::<IMFMediaEventGenerator>().ok()
@@ -649,8 +659,9 @@ impl VideoDecoder for MfH264Decoder {
             }
             let deadline = Instant::now() + Duration::from_millis(120);
             while let Some(event) = poll_next_mft_event(&event_gen, deadline)? {
-                let kind = unsafe { event.GetType() }
-                    .map_err(|err| Key2PcError::Display(format!("Decoder GetType failed: {err}")))?;
+                let kind = unsafe { event.GetType() }.map_err(|err| {
+                    Key2PcError::Display(format!("Decoder GetType failed: {err}"))
+                })?;
                 if kind == MEError.0 as u32 {
                     return Err(Key2PcError::Display("Decoder reported MEError".to_string()));
                 }
@@ -692,14 +703,7 @@ impl VideoDecoder for MfH264Decoder {
     }
 }
 
-fn copy_nv12_planes(
-    src: &[u8],
-    pitch: usize,
-    coded_h: usize,
-    w: usize,
-    h: usize,
-    dst: &mut [u8],
-) {
+fn copy_nv12_planes(src: &[u8], pitch: usize, coded_h: usize, w: usize, h: usize, dst: &mut [u8]) {
     for row in 0..h {
         let src_off = row * pitch;
         let dst_off = row * w;

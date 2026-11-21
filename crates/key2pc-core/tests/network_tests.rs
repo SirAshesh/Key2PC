@@ -13,10 +13,18 @@ fn retransmit_queue_tracks_acks_and_retries() {
     queue.push(10, raw, start);
     assert!(!queue.is_empty());
 
-    let due_early = queue.collect_due(start + Duration::from_millis(1), Duration::from_millis(3), 2);
+    let due_early = queue.collect_due(
+        start + Duration::from_millis(1),
+        Duration::from_millis(3),
+        2,
+    );
     assert!(due_early.is_empty());
 
-    let due_first = queue.collect_due(start + Duration::from_millis(3), Duration::from_millis(3), 2);
+    let due_first = queue.collect_due(
+        start + Duration::from_millis(3),
+        Duration::from_millis(3),
+        2,
+    );
     assert_eq!(due_first.len(), 1);
 
     let rtt = queue.ack(10, start + Duration::from_millis(4));
@@ -61,7 +69,10 @@ fn udp_sockets_exchange_packets_over_loopback() {
     assert_eq!(decoded, pkt);
 
     server
-        .send_to(&Packet::ack(decoded.seq, decoded.timestamp_us).encode(&key), peer)
+        .send_to(
+            &Packet::ack(decoded.seq, decoded.timestamp_us).encode(&key),
+            peer,
+        )
         .unwrap();
     let (ack_n, _) = client.recv_from(&mut buf).unwrap();
     let ack = Packet::decode(&buf[..ack_n], &key).unwrap();

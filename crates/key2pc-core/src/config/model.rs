@@ -74,11 +74,7 @@ impl HotkeyConfig {
     pub fn to_binding(&self) -> Result<HotkeyBinding> {
         let vk = parse_virtual_key(&self.key)?;
         Ok(HotkeyBinding::new(
-            self.ctrl,
-            self.alt,
-            self.shift,
-            self.win,
-            vk,
+            self.ctrl, self.alt, self.shift, self.win, vk,
         ))
     }
 }
@@ -143,6 +139,8 @@ pub struct ReceiverConfig {
 pub struct DisplayConfig {
     pub enabled: bool,
     pub virtual_monitor: bool,
+    pub match_source_resolution: bool,
+    pub fill_screen: bool,
     pub video_port: u16,
     pub monitor: String,
     pub width: u32,
@@ -160,6 +158,8 @@ impl Default for DisplayConfig {
         Self {
             enabled: true,
             virtual_monitor: true,
+            match_source_resolution: true,
+            fill_screen: false,
             video_port: 24802,
             monitor: "auto".to_string(),
             width: 1920,
@@ -278,7 +278,8 @@ impl AppConfig {
             ));
         }
         let monitor_trimmed = self.display.monitor.trim();
-        if !monitor_trimmed.eq_ignore_ascii_case("auto") && monitor_trimmed.parse::<usize>().is_err()
+        if !monitor_trimmed.eq_ignore_ascii_case("auto")
+            && monitor_trimmed.parse::<usize>().is_err()
         {
             return Err(Key2PcError::InvalidConfig(format!(
                 "display.monitor must be 'auto' or an index, got '{}'",

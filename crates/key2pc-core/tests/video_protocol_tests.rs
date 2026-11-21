@@ -35,19 +35,10 @@ fn chunks_and_reassembles_out_of_order_frames() {
     let key = derive_auth_key("chunk-secret");
     let raw_frame: Vec<u8> = (0..5000).map(|i| (i % 251) as u8).collect();
     let mut packets = Vec::new();
-    chunk_video_frame(
-        1,
-        1920,
-        1080,
-        true,
-        1000,
-        &raw_frame,
-        &key,
-        |pkt| {
-            packets.push(pkt.to_vec());
-            Ok(())
-        },
-    )
+    chunk_video_frame(1, 1920, 1080, true, 1000, &raw_frame, &key, |pkt| {
+        packets.push(pkt.to_vec());
+        Ok(())
+    })
     .unwrap();
     assert_eq!(packets.len(), 4);
 
@@ -109,19 +100,10 @@ fn assembles_keyframe_with_wifi_jitter_under_250ms_budget() {
     let key = derive_auth_key("jitter-secret");
     let raw_frame: Vec<u8> = (0..12_000).map(|i| (i % 253) as u8).collect();
     let mut packets = Vec::new();
-    chunk_video_frame(
-        42,
-        1920,
-        1080,
-        true,
-        5555,
-        &raw_frame,
-        &key,
-        |pkt| {
-            packets.push(pkt.to_vec());
-            Ok(())
-        },
-    )
+    chunk_video_frame(42, 1920, 1080, true, 5555, &raw_frame, &key, |pkt| {
+        packets.push(pkt.to_vec());
+        Ok(())
+    })
     .unwrap();
     assert!(packets.len() >= 8);
 

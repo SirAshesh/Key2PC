@@ -2,9 +2,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::error::{Key2PcError, Result};
-use crate::protocol::packet::{
-    constant_time_eq_16, PROTOCOL_MAGIC, PROTOCOL_VERSION,
-};
+use crate::protocol::packet::{constant_time_eq_16, PROTOCOL_MAGIC, PROTOCOL_VERSION};
 
 pub const VIDEO_PACKET_HEADER_SIZE: usize = 44;
 pub const MAX_VIDEO_CHUNK_PAYLOAD: usize = 1340;
@@ -115,12 +113,16 @@ pub fn decode_video_packet<'a>(
         )));
     }
     if bytes[0..2] != PROTOCOL_MAGIC || bytes[2] != PROTOCOL_VERSION {
-        return Err(Key2PcError::Protocol("Invalid video packet header".to_string()));
+        return Err(Key2PcError::Protocol(
+            "Invalid video packet header".to_string(),
+        ));
     }
 
     let payload_len = u16::from_le_bytes(bytes[18..20].try_into().unwrap()) as usize;
     if bytes.len() != VIDEO_PACKET_HEADER_SIZE + payload_len {
-        return Err(Key2PcError::Protocol("Video payload length mismatch".to_string()));
+        return Err(Key2PcError::Protocol(
+            "Video payload length mismatch".to_string(),
+        ));
     }
 
     let payload = &bytes[VIDEO_PACKET_HEADER_SIZE..];

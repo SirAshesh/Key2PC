@@ -120,7 +120,11 @@ impl HookProcessor {
         let event = KeyEvent {
             vk,
             scan_code,
-            action: if is_up { KeyAction::Up } else { KeyAction::Down },
+            action: if is_up {
+                KeyAction::Up
+            } else {
+                KeyAction::Down
+            },
             extended,
             alt_down,
         };

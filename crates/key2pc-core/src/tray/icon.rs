@@ -115,10 +115,8 @@ fn is_keyboard_glyph_pixel(x: u32, y: u32) -> bool {
         return true;
     }
 
-    let row1 = (y == 12 || y == 13)
-        && matches!(x, 9..=10 | 12..=13 | 15..=16 | 18..=19 | 21..=22);
-    let row2 = (y == 15 || y == 16)
-        && matches!(x, 9..=10 | 12..=13 | 15..=16 | 18..=19 | 21..=22);
+    let row1 = (y == 12 || y == 13) && matches!(x, 9..=10 | 12..=13 | 15..=16 | 18..=19 | 21..=22);
+    let row2 = (y == 15 || y == 16) && matches!(x, 9..=10 | 12..=13 | 15..=16 | 18..=19 | 21..=22);
     let spacebar = (y == 18 || y == 19) && (11..=20).contains(&x);
 
     row1 || row2 || spacebar

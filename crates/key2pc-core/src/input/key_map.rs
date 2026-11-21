@@ -79,7 +79,9 @@ pub const VK_MENU: u16 = 0x12;
 pub fn parse_virtual_key(input: &str) -> Result<u16> {
     let normalized = input.trim().to_ascii_uppercase();
     if normalized.is_empty() {
-        return Err(Key2PcError::InvalidConfig("Empty hotkey key name".to_string()));
+        return Err(Key2PcError::InvalidConfig(
+            "Empty hotkey key name".to_string(),
+        ));
     }
 
     if normalized.len() == 1 {
@@ -117,7 +119,9 @@ pub fn parse_virtual_key(input: &str) -> Result<u16> {
         }
     }
 
-    Err(Key2PcError::InvalidConfig(format!("Unknown hotkey key: {input}")))
+    Err(Key2PcError::InvalidConfig(format!(
+        "Unknown hotkey key: {input}"
+    )))
 }
 
 pub fn format_virtual_key(vk: u16) -> String {

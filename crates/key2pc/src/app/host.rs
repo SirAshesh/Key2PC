@@ -80,6 +80,12 @@ impl AppHost {
         }
     }
 
+    pub fn toggle_fill_screen(&self) {
+        if let Some(svc) = &self.service {
+            svc.toggle_fill_screen();
+        }
+    }
+
     pub fn toggle_virtual_monitor(&self) {
         if let Some(svc) = &self.service {
             svc.toggle_virtual_monitor();

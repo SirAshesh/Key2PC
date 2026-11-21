@@ -37,8 +37,8 @@ pub fn resolve_target_host(target_host: &str, port: u16) -> Result<Option<Socket
 
 #[cfg(target_os = "windows")]
 pub fn enumerate_broadcast_targets(port: u16) -> Vec<SocketAddr> {
-    use std::os::windows::io::AsRawSocket;
     use socket2::{Domain, Protocol, Socket, Type};
+    use std::os::windows::io::AsRawSocket;
     use windows_sys::Win32::Networking::WinSock::{
         WSAIoctl, AF_INET, IFF_BROADCAST, IFF_LOOPBACK, IFF_UP, INTERFACE_INFO, SOCKET,
     };

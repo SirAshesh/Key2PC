@@ -35,7 +35,9 @@ impl PacketKind {
             7 => Ok(Self::Ping),
             8 => Ok(Self::Pong),
             9 => Ok(Self::MouseEvent),
-            _ => Err(Key2PcError::Protocol(format!("Unknown packet kind: {value}"))),
+            _ => Err(Key2PcError::Protocol(format!(
+                "Unknown packet kind: {value}"
+            ))),
         }
     }
 }
@@ -119,7 +121,9 @@ impl MouseAction {
             10 => Ok(Self::X2Up),
             11 => Ok(Self::Wheel),
             12 => Ok(Self::HWheel),
-            _ => Err(Key2PcError::Protocol(format!("Unknown mouse action: {value}"))),
+            _ => Err(Key2PcError::Protocol(format!(
+                "Unknown mouse action: {value}"
+            ))),
         }
     }
 

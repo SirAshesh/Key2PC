@@ -112,8 +112,8 @@ mod win {
         SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
         SetupDiGetDeviceRegistryPropertyW, CM_DEVNODE_STATUS_FLAGS, CM_PROB, CM_PROB_NEED_RESTART,
         CR_SUCCESS, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, DN_DRIVER_LOADED, DN_HAS_PROBLEM,
-        DN_STARTED, SPDRP_HARDWAREID, SP_DEVICE_INTERFACE_DATA,
-        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
+        DN_STARTED, SPDRP_HARDWAREID, SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+        SP_DEVINFO_DATA,
     };
     use windows::Win32::Devices::Display::{
         SetDisplayConfig, SDC_ALLOW_CHANGES, SDC_APPLY, SDC_TOPOLOGY_EXTEND,
@@ -131,8 +131,8 @@ mod win {
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_NO_BUFFERING, FILE_FLAG_OVERLAPPED,
         FILE_FLAG_WRITE_THROUGH, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    use windows::Win32::System::IO::{DeviceIoControl, GetOverlappedResultEx, OVERLAPPED};
     use windows::Win32::System::Threading::CreateEventW;
+    use windows::Win32::System::IO::{DeviceIoControl, GetOverlappedResultEx, OVERLAPPED};
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::{
         MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, SW_SHOWNORMAL,
@@ -288,8 +288,13 @@ mod win {
                 keepalive_handle: None,
                 device_name: None,
             };
-            guard.device_name =
-                wait_and_extend_virtual_monitor(&[], width, height, fps, Duration::from_millis(1000));
+            guard.device_name = wait_and_extend_virtual_monitor(
+                &[],
+                width,
+                height,
+                fps,
+                Duration::from_millis(1000),
+            );
             if guard.device_name.is_none() {
                 return Err(Key2PcError::Display(
                     "Virtual Display Driver detected but no active virtual monitor appeared"
@@ -426,9 +431,10 @@ mod win {
             ));
         }
 
-        let local_driver = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|dir| dir.join("drivers").join("parsec-vdd-0.45.0.0.exe")));
+        let local_driver = std::env::current_exe().ok().and_then(|p| {
+            p.parent()
+                .map(|dir| dir.join("drivers").join("parsec-vdd-0.45.0.0.exe"))
+        });
 
         let (installer_path, cleanup_dir): (PathBuf, Option<PathBuf>) =
             if let Some(local) = local_driver.filter(|p| p.is_file()) {
@@ -493,7 +499,14 @@ mod win {
     fn download_parsec_driver_installer(target: &std::path::Path) -> Result<()> {
         let target_str = target.to_string_lossy();
         let curl_ok = Command::new("curl.exe")
-            .args(["-fsSL", "--retry", "2", "-o", &target_str, PARSEC_DRIVER_URL])
+            .args([
+                "-fsSL",
+                "--retry",
+                "2",
+                "-o",
+                &target_str,
+                PARSEC_DRIVER_URL,
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -505,7 +518,13 @@ mod win {
                 target_str.replace('\'', "''")
             );
             let ps_status = Command::new("powershell.exe")
-                .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_script])
+                .args([
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    &ps_script,
+                ])
                 .status()?;
             if !ps_status.success() {
                 return Err(Key2PcError::Display(
@@ -530,7 +549,13 @@ mod win {
             path.to_string_lossy().replace('\'', "''")
         );
         let status = Command::new("powershell.exe")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_cmd])
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &ps_cmd,
+            ])
             .status()?;
         if !status.success() {
             return Err(Key2PcError::Display(
@@ -606,10 +631,7 @@ mod win {
             .collect()
     }
 
-    fn read_devnode_status(
-        dev_inst: u32,
-        backend: VirtualDriverBackend,
-    ) -> VirtualDriverStatus {
+    fn read_devnode_status(dev_inst: u32, backend: VirtualDriverBackend) -> VirtualDriverStatus {
         let mut dev_status = CM_DEVNODE_STATUS_FLAGS(0);
         let mut problem = CM_PROB(0);
         let cr = unsafe { CM_Get_DevNode_Status(&mut dev_status, &mut problem, dev_inst, 0) };
@@ -648,13 +670,7 @@ mod win {
                 ..Default::default()
             };
             if unsafe {
-                SetupDiEnumDeviceInterfaces(
-                    dev_info,
-                    None,
-                    &VDD_ADAPTER_GUID,
-                    idx,
-                    &mut iface_data,
-                )
+                SetupDiEnumDeviceInterfaces(dev_info, None, &VDD_ADAPTER_GUID, idx, &mut iface_data)
             }
             .is_err()
             {
@@ -677,8 +693,12 @@ mod win {
                 continue;
             }
 
-            let mut detail_buf =
-                vec![0u8; (detail_size as usize).max(std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>())];
+            let mut detail_buf = vec![
+                0u8;
+                (detail_size as usize).max(std::mem::size_of::<
+                    SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+                >())
+            ];
             let detail_ptr = detail_buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
             unsafe {
                 (*detail_ptr).cbSize =
@@ -764,7 +784,9 @@ mod win {
                 unsafe {
                     let _ = CloseHandle(event);
                 }
-                return Err(Key2PcError::Display(format!("DeviceIoControl failed: {err}")));
+                return Err(Key2PcError::Display(format!(
+                    "DeviceIoControl failed: {err}"
+                )));
             }
         }
 
@@ -903,9 +925,7 @@ mod win {
             .iter()
             .find(|d| d.is_primary)
             .and_then(|d| read_current_devmode(&d.device_name))
-            .map(|dm| unsafe {
-                dm.Anonymous1.Anonymous2.dmPosition.x + dm.dmPelsWidth as i32
-            })
+            .map(|dm| unsafe { dm.Anonymous1.Anonymous2.dmPosition.x + dm.dmPelsWidth as i32 })
             .unwrap_or(1920);
 
         let dev_w: Vec<u16> = virtual_dev_name
@@ -960,8 +980,9 @@ mod win {
                 rc.0
             )));
         }
-        let commit_rc =
-            unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_UPDATEREGISTRY, None) };
+        let commit_rc = unsafe {
+            ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_UPDATEREGISTRY, None)
+        };
         if commit_rc != DISP_CHANGE_SUCCESSFUL {
             let _ = unsafe {
                 ChangeDisplaySettingsExW(PCWSTR::null(), None, None, Default::default(), None)

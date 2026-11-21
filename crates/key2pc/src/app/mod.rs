@@ -67,6 +67,7 @@ pub fn run() -> i32 {
                 TrayAction::ToggleForwarding => host.toggle_active(),
                 TrayAction::ToggleDisplay => host.toggle_display(),
                 TrayAction::ToggleFullscreen => host.toggle_fullscreen(),
+                TrayAction::ToggleFillScreen => host.toggle_fill_screen(),
                 TrayAction::ToggleVirtualMonitor => host.toggle_virtual_monitor(),
                 TrayAction::InstallVirtualDriver => host.install_virtual_driver(),
                 TrayAction::ReleaseAll => host.release_all(),

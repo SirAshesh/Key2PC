@@ -10,14 +10,14 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
     ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
     ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-    D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D,
+    D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+    D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
@@ -26,7 +26,9 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
     DXGI_ERROR_DEVICE_RESET, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_CURRENTLY_AVAILABLE,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayDevicesW,
@@ -36,10 +38,14 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, HICON, ICONINFO,
+};
 
 use crate::display::{
-    is_virtual_display_signature, select_best_monitor, utf16_z_to_string, CaptureResult,
-    MonitorInfo, ScreenCapturer, EDD_GET_DEVICE_INTERFACE_NAME,
+    compute_encode_dimensions, is_virtual_display_signature, select_best_monitor,
+    utf16_z_to_string, CaptureResult, MonitorInfo, PointerShapeDesc, ScreenCapturer,
+    EDD_GET_DEVICE_INTERFACE_NAME,
 };
 use crate::error::{Key2PcError, Result};
 use crate::input::DesktopBounds;
@@ -207,7 +213,9 @@ impl GdiCaptureFallback {
                 let _ = DeleteDC(mem_dc);
                 ReleaseDC(None, screen_dc);
             }
-            return Err(Key2PcError::Display("CreateDIBSection null bits".to_string()));
+            return Err(Key2PcError::Display(
+                "CreateDIBSection null bits".to_string(),
+            ));
         }
 
         let old_obj = unsafe { SelectObject(mem_dc, HGDIOBJ(bitmap.0)) };
@@ -240,6 +248,7 @@ impl GdiCaptureFallback {
         if ok.is_err() {
             return Err(Key2PcError::Display("GDI BitBlt failed".to_string()));
         }
+        draw_gdi_cursor(self.mem_dc, self.bounds);
         unsafe {
             let _ = GdiFlush();
         }
@@ -270,8 +279,30 @@ impl Drop for GdiCaptureFallback {
     }
 }
 
+#[derive(Default)]
+struct PointerShapeState {
+    data: Vec<u8>,
+    info: DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    visible: bool,
+    x: i32,
+    y: i32,
+}
+
+impl PointerShapeState {
+    fn logical_height(&self) -> u32 {
+        if self.info.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32 {
+            self.info.Height / 2
+        } else {
+            self.info.Height
+        }
+    }
+}
+
 pub struct DxgiScreenCapturer {
     monitor_setting: String,
+    cfg_width: u32,
+    cfg_height: u32,
+    match_source_resolution: bool,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     output1: IDXGIOutput1,
@@ -279,6 +310,11 @@ pub struct DxgiScreenCapturer {
     gpu_converter: Option<GpuColorConverter>,
     cpu_bgra_staging: Option<ID3D11Texture2D>,
     gdi_fallback: Option<GdiCaptureFallback>,
+    pointer: PointerShapeState,
+    pointer_patch_staging: Option<ID3D11Texture2D>,
+    pointer_patch_capacity: (u32, u32),
+    pointer_scratch_bgra: Vec<u8>,
+    cpu_bgra_work: Vec<u8>,
     src_width: u32,
     src_height: u32,
     bounds: DesktopBounds,
@@ -298,18 +334,36 @@ struct CapturePipelineState {
     gdi_fallback: Option<GdiCaptureFallback>,
     src_width: u32,
     src_height: u32,
+    target_width: u32,
+    target_height: u32,
     bounds: DesktopBounds,
 }
 
 impl DxgiScreenCapturer {
     pub fn new(monitor_setting: &str, target_width: u32, target_height: u32) -> Result<Self> {
-        let dst_w = target_width & !1;
-        let dst_h = target_height & !1;
-        let state = build_capture_pipeline(monitor_setting, dst_w, dst_h, false)?;
+        Self::new_with_mode(monitor_setting, target_width, target_height, false)
+    }
+
+    pub fn new_with_mode(
+        monitor_setting: &str,
+        cfg_width: u32,
+        cfg_height: u32,
+        match_source_resolution: bool,
+    ) -> Result<Self> {
+        let state = build_capture_pipeline(
+            monitor_setting,
+            cfg_width,
+            cfg_height,
+            match_source_resolution,
+            false,
+        )?;
         let now = Instant::now();
 
         Ok(Self {
             monitor_setting: monitor_setting.to_string(),
+            cfg_width,
+            cfg_height,
+            match_source_resolution,
             device: state.device,
             context: state.context,
             output1: state.output1,
@@ -317,11 +371,16 @@ impl DxgiScreenCapturer {
             gpu_converter: state.gpu_converter,
             cpu_bgra_staging: state.cpu_bgra_staging,
             gdi_fallback: state.gdi_fallback,
+            pointer: PointerShapeState::default(),
+            pointer_patch_staging: None,
+            pointer_patch_capacity: (0, 0),
+            pointer_scratch_bgra: Vec::new(),
+            cpu_bgra_work: Vec::new(),
             src_width: state.src_width,
             src_height: state.src_height,
             bounds: state.bounds,
-            target_width: dst_w,
-            target_height: dst_h,
+            target_width: state.target_width,
+            target_height: state.target_height,
             last_bounds_check: now,
             last_dxgi_retry: now,
         })
@@ -348,10 +407,13 @@ impl DxgiScreenCapturer {
         self.gpu_converter = None;
         self.cpu_bgra_staging = None;
         self.gdi_fallback = None;
+        self.pointer_patch_staging = None;
+        self.pointer_patch_capacity = (0, 0);
         let state = build_capture_pipeline(
             &self.monitor_setting,
-            self.target_width,
-            self.target_height,
+            self.cfg_width,
+            self.cfg_height,
+            self.match_source_resolution,
             prefer_gdi,
         )?;
         self.device = state.device;
@@ -363,6 +425,8 @@ impl DxgiScreenCapturer {
         self.gdi_fallback = state.gdi_fallback;
         self.src_width = state.src_width;
         self.src_height = state.src_height;
+        self.target_width = state.target_width;
+        self.target_height = state.target_height;
         self.bounds = state.bounds;
         let now = Instant::now();
         self.last_bounds_check = now;
@@ -399,8 +463,13 @@ impl DxgiScreenCapturer {
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
-            self.context
-                .Map(&conv.nv12_staging_tex, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            self.context.Map(
+                &conv.nv12_staging_tex,
+                0,
+                D3D11_MAP_READ,
+                0,
+                Some(&mut mapped),
+            )
         }
         .map_err(|err| Key2PcError::Display(format!("Map NV12 staging failed: {err}")))?;
 
@@ -434,7 +503,7 @@ impl DxgiScreenCapturer {
     }
 
     fn copy_cpu_bgra_to_nv12(
-        &self,
+        &mut self,
         staging: &ID3D11Texture2D,
         out_nv12: &mut Vec<u8>,
     ) -> Result<()> {
@@ -450,15 +519,179 @@ impl DxgiScreenCapturer {
         let dst_w = self.target_width as usize;
         let dst_h = self.target_height as usize;
         let pitch = mapped.RowPitch as usize;
-        let src = unsafe { slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * src_h) };
+        let mapped_slice =
+            unsafe { slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * src_h) };
+
+        let bgra_src: &[u8] = if self.pointer.visible && !self.pointer.data.is_empty() {
+            let tight_pitch = src_w * 4;
+            self.cpu_bgra_work.resize(tight_pitch * src_h, 0);
+            for row in 0..src_h {
+                let s_off = row * pitch;
+                let d_off = row * tight_pitch;
+                self.cpu_bgra_work[d_off..d_off + tight_pitch]
+                    .copy_from_slice(&mapped_slice[s_off..s_off + tight_pitch]);
+            }
+            let shape_desc = PointerShapeDesc {
+                pointer_type: self.pointer.info.Type,
+                width: self.pointer.info.Width,
+                height: self.pointer.info.Height,
+                pitch: self.pointer.info.Pitch,
+            };
+            composite_dxgi_pointer_over_bgra(
+                &mut self.cpu_bgra_work,
+                src_w,
+                src_h,
+                tight_pitch,
+                0,
+                0,
+                self.pointer.x,
+                self.pointer.y,
+                &shape_desc,
+                &self.pointer.data,
+            );
+            &self.cpu_bgra_work
+        } else {
+            mapped_slice
+        };
+        let used_pitch = if self.pointer.visible && !self.pointer.data.is_empty() {
+            src_w * 4
+        } else {
+            pitch
+        };
 
         out_nv12.resize(dst_w * dst_h * 3 / 2, 0);
-        bgra_to_nv12_scaled(src, src_w, src_h, pitch, dst_w, dst_h, out_nv12);
+        bgra_to_nv12_scaled(bgra_src, src_w, src_h, used_pitch, dst_w, dst_h, out_nv12);
 
         unsafe {
             self.context.Unmap(staging, 0);
         }
         Ok(())
+    }
+
+    fn overlay_dxgi_pointer_on_gpu(
+        &mut self,
+        desktop_tex: &ID3D11Texture2D,
+        capture_tex: &ID3D11Texture2D,
+    ) {
+        if !self.pointer.visible || self.pointer.data.is_empty() {
+            return;
+        }
+        let ptr_w = self.pointer.info.Width as i32;
+        let ptr_h = self.pointer.logical_height() as i32;
+        if ptr_w <= 0 || ptr_h <= 0 {
+            return;
+        }
+
+        let x0 = self.pointer.x.max(0);
+        let y0 = self.pointer.y.max(0);
+        let x1 = (self.pointer.x + ptr_w).min(self.src_width as i32);
+        let y1 = (self.pointer.y + ptr_h).min(self.src_height as i32);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        let cw = (x1 - x0) as u32;
+        let ch = (y1 - y0) as u32;
+        if self.pointer_patch_staging.is_none()
+            || self.pointer_patch_capacity.0 < cw
+            || self.pointer_patch_capacity.1 < ch
+        {
+            let alloc_w = cw.max(128);
+            let alloc_h = ch.max(128);
+            let Ok(tex) = create_texture(
+                &self.device,
+                alloc_w,
+                alloc_h,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                D3D11_USAGE_STAGING,
+                0,
+                D3D11_CPU_ACCESS_READ.0 as u32,
+            ) else {
+                return;
+            };
+            self.pointer_patch_staging = Some(tex);
+            self.pointer_patch_capacity = (alloc_w, alloc_h);
+        }
+
+        let Some(patch_tex) = &self.pointer_patch_staging else {
+            return;
+        };
+        let src_box = D3D11_BOX {
+            left: x0 as u32,
+            top: y0 as u32,
+            front: 0,
+            right: x1 as u32,
+            bottom: y1 as u32,
+            back: 1,
+        };
+        unsafe {
+            self.context.CopySubresourceRegion(
+                patch_tex,
+                0,
+                0,
+                0,
+                0,
+                desktop_tex,
+                0,
+                Some(&src_box),
+            );
+        }
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        if unsafe {
+            self.context
+                .Map(patch_tex, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+        }
+        .is_err()
+        {
+            return;
+        }
+
+        let tight_pitch = (cw as usize) * 4;
+        self.pointer_scratch_bgra
+            .resize(tight_pitch * (ch as usize), 0);
+        let map_pitch = mapped.RowPitch as usize;
+        let map_slice =
+            unsafe { slice::from_raw_parts(mapped.pData.cast::<u8>(), map_pitch * (ch as usize)) };
+        for row in 0..(ch as usize) {
+            let s_off = row * map_pitch;
+            let d_off = row * tight_pitch;
+            self.pointer_scratch_bgra[d_off..d_off + tight_pitch]
+                .copy_from_slice(&map_slice[s_off..s_off + tight_pitch]);
+        }
+        unsafe {
+            self.context.Unmap(patch_tex, 0);
+        }
+
+        let shape_desc = PointerShapeDesc {
+            pointer_type: self.pointer.info.Type,
+            width: self.pointer.info.Width,
+            height: self.pointer.info.Height,
+            pitch: self.pointer.info.Pitch,
+        };
+        composite_dxgi_pointer_over_bgra(
+            &mut self.pointer_scratch_bgra,
+            cw as usize,
+            ch as usize,
+            tight_pitch,
+            x0,
+            y0,
+            self.pointer.x,
+            self.pointer.y,
+            &shape_desc,
+            &self.pointer.data,
+        );
+
+        unsafe {
+            self.context.UpdateSubresource(
+                capture_tex,
+                0,
+                Some(&src_box),
+                self.pointer_scratch_bgra.as_ptr().cast(),
+                tight_pitch as u32,
+                0,
+            );
+        }
     }
 }
 
@@ -484,9 +717,13 @@ impl ScreenCapturer for DxgiScreenCapturer {
 
         if self.duplication.is_none() && self.last_dxgi_retry.elapsed() >= Duration::from_secs(2) {
             self.last_dxgi_retry = Instant::now();
-            if let Ok(state) =
-                build_capture_pipeline(&self.monitor_setting, self.target_width, self.target_height, false)
-            {
+            if let Ok(state) = build_capture_pipeline(
+                &self.monitor_setting,
+                self.cfg_width,
+                self.cfg_height,
+                self.match_source_resolution,
+                false,
+            ) {
                 if state.duplication.is_some() {
                     self.device = state.device;
                     self.context = state.context;
@@ -495,88 +732,125 @@ impl ScreenCapturer for DxgiScreenCapturer {
                     self.gpu_converter = state.gpu_converter;
                     self.cpu_bgra_staging = state.cpu_bgra_staging;
                     self.gdi_fallback = None;
+                    self.pointer_patch_staging = None;
+                    self.pointer_patch_capacity = (0, 0);
                     self.src_width = state.src_width;
                     self.src_height = state.src_height;
+                    self.target_width = state.target_width;
+                    self.target_height = state.target_height;
                     self.bounds = state.bounds;
                     return Ok(CaptureResult::Reinitialized);
                 }
             }
         }
 
-        let Some(duplication) = &self.duplication else {
-            if let Some(gdi) = &mut self.gdi_fallback {
-                gdi.capture_nv12(
-                    self.target_width as usize,
-                    self.target_height as usize,
-                    out_nv12,
-                )?;
-                return Ok(CaptureResult::Captured);
-            }
-            return Err(Key2PcError::Display(
-                "No screen capture backend available".to_string(),
-            ));
-        };
+        if let Some(duplication) = self.duplication.clone() {
+            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource = None;
+            let acquire_res =
+                unsafe { duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource) };
 
-        let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
-        let mut resource = None;
-        let acquire_res = unsafe {
-            duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)
-        };
-
-        if let Err(err) = acquire_res {
-            let code = err.code();
-            if code == DXGI_ERROR_WAIT_TIMEOUT {
-                return Ok(CaptureResult::Timeout);
+            if let Err(err) = acquire_res {
+                let code = err.code();
+                if code == DXGI_ERROR_WAIT_TIMEOUT {
+                    return Ok(CaptureResult::Timeout);
+                }
+                if code == DXGI_ERROR_ACCESS_LOST
+                    || code == DXGI_ERROR_INVALID_CALL
+                    || code == DXGI_ERROR_DEVICE_RESET
+                    || code == DXGI_ERROR_DEVICE_REMOVED
+                    || code == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+                {
+                    self.recreate_duplication()?;
+                    return Ok(CaptureResult::Reinitialized);
+                }
+                return Err(Key2PcError::Display(format!(
+                    "AcquireNextFrame failed: {err}"
+                )));
             }
-            if code == DXGI_ERROR_ACCESS_LOST
-                || code == DXGI_ERROR_INVALID_CALL
-                || code == DXGI_ERROR_DEVICE_RESET
-                || code == DXGI_ERROR_DEVICE_REMOVED
-                || code == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
-            {
+
+            if frame_info.LastMouseUpdateTime != 0 {
+                self.pointer.visible = frame_info.PointerPosition.Visible.as_bool();
+                self.pointer.x = frame_info.PointerPosition.Position.x;
+                self.pointer.y = frame_info.PointerPosition.Position.y;
+                if frame_info.PointerShapeBufferSize > 0 {
+                    let needed = frame_info.PointerShapeBufferSize as usize;
+                    if self.pointer.data.len() < needed {
+                        self.pointer.data.resize(needed, 0);
+                    }
+                    let mut req = 0u32;
+                    let mut shape_info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+                    if unsafe {
+                        duplication.GetFramePointerShape(
+                            needed as u32,
+                            self.pointer.data.as_mut_ptr().cast(),
+                            &mut req,
+                            &mut shape_info,
+                        )
+                    }
+                    .is_ok()
+                    {
+                        self.pointer.data.truncate(req as usize);
+                        self.pointer.info = shape_info;
+                    }
+                }
+            }
+
+            let desktop_res = resource.ok_or_else(|| {
+                let _ = unsafe { duplication.ReleaseFrame() };
+                Key2PcError::Display("Empty desktop resource".to_string())
+            })?;
+
+            let Ok(desktop_tex) = desktop_res.cast::<ID3D11Texture2D>() else {
+                let _ = unsafe { duplication.ReleaseFrame() };
+                return Err(Key2PcError::Display(
+                    "Frame texture cast failed".to_string(),
+                ));
+            };
+
+            let mut tex_desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe { desktop_tex.GetDesc(&mut tex_desc) };
+            if tex_desc.Width != self.src_width || tex_desc.Height != self.src_height {
+                let _ = unsafe { duplication.ReleaseFrame() };
                 self.recreate_duplication()?;
                 return Ok(CaptureResult::Reinitialized);
             }
-            return Err(Key2PcError::Display(format!("AcquireNextFrame failed: {err}")));
-        }
 
-        let desktop_res = resource.ok_or_else(|| {
+            let capture_tex_opt = self
+                .gpu_converter
+                .as_ref()
+                .map(|conv| conv.capture_tex.clone());
+            if let Some(capture_tex) = capture_tex_opt {
+                unsafe {
+                    self.context.CopyResource(&capture_tex, &desktop_tex);
+                }
+                self.overlay_dxgi_pointer_on_gpu(&desktop_tex, &capture_tex);
+            } else if let Some(staging) = &self.cpu_bgra_staging {
+                unsafe {
+                    self.context.CopyResource(staging, &desktop_tex);
+                }
+            }
             let _ = unsafe { duplication.ReleaseFrame() };
-            Key2PcError::Display("Empty desktop resource".to_string())
-        })?;
 
-        let Ok(desktop_tex) = desktop_res.cast::<ID3D11Texture2D>() else {
-            let _ = unsafe { duplication.ReleaseFrame() };
-            return Err(Key2PcError::Display(
-                "Frame texture cast failed".to_string(),
-            ));
-        };
-
-        let mut tex_desc = D3D11_TEXTURE2D_DESC::default();
-        unsafe { desktop_tex.GetDesc(&mut tex_desc) };
-        if tex_desc.Width != self.src_width || tex_desc.Height != self.src_height {
-            let _ = unsafe { duplication.ReleaseFrame() };
-            self.recreate_duplication()?;
-            return Ok(CaptureResult::Reinitialized);
+            if let Some(conv) = &self.gpu_converter {
+                self.copy_gpu_nv12(conv, out_nv12)?;
+            } else if let Some(staging) = self.cpu_bgra_staging.clone() {
+                self.copy_cpu_bgra_to_nv12(&staging, out_nv12)?;
+            }
+            return Ok(CaptureResult::Captured);
         }
 
-        let target_tex = if let Some(conv) = &self.gpu_converter {
-            &conv.capture_tex
-        } else {
-            self.cpu_bgra_staging.as_ref().unwrap()
-        };
-
-        unsafe {
-            self.context.CopyResource(target_tex, &desktop_tex);
+        if let Some(gdi) = &mut self.gdi_fallback {
+            gdi.capture_nv12(
+                self.target_width as usize,
+                self.target_height as usize,
+                out_nv12,
+            )?;
+            return Ok(CaptureResult::Captured);
         }
-        let _ = unsafe { duplication.ReleaseFrame() };
-
-        if let Some(conv) = &self.gpu_converter {
-            self.copy_gpu_nv12(conv, out_nv12)?;
-        } else if let Some(staging) = &self.cpu_bgra_staging {
-            self.copy_cpu_bgra_to_nv12(staging, out_nv12)?;
-        }
-        Ok(CaptureResult::Captured)
+        Err(Key2PcError::Display(
+            "No screen capture backend available".to_string(),
+        ))
     }
 }
 
@@ -594,8 +868,9 @@ fn query_active_monitor_bounds(monitor_setting: &str) -> Result<DesktopBounds> {
 
 fn build_capture_pipeline(
     monitor_setting: &str,
-    dst_w: u32,
-    dst_h: u32,
+    cfg_w: u32,
+    cfg_h: u32,
+    match_source_resolution: bool,
     prefer_gdi: bool,
 ) -> Result<CapturePipelineState> {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
@@ -612,6 +887,8 @@ fn build_capture_pipeline(
     let bounds = selected.info.bounds;
     let src_w = bounds.width as u32;
     let src_h = bounds.height as u32;
+    let (dst_w, dst_h) =
+        compute_encode_dimensions(src_w, src_h, cfg_w, cfg_h, match_source_resolution);
 
     let (device, context) = create_adapter_device(&selected.adapter)?;
     if let Ok(mt) = device.cast::<ID3D11Multithread>() {
@@ -658,8 +935,154 @@ fn build_capture_pipeline(
         gdi_fallback,
         src_width: src_w,
         src_height: src_h,
+        target_width: dst_w,
+        target_height: dst_h,
         bounds,
     })
+}
+
+fn draw_gdi_cursor(mem_dc: HDC, bounds: DesktopBounds) {
+    let mut ci = CURSORINFO {
+        cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetCursorInfo(&mut ci) }.is_err() {
+        return;
+    }
+    if (ci.flags.0 & CURSOR_SHOWING.0) == 0 || ci.hCursor.is_invalid() {
+        return;
+    }
+    let mut ii = ICONINFO::default();
+    let mut hx = 0i32;
+    let mut hy = 0i32;
+    let icon = HICON(ci.hCursor.0);
+    if unsafe { GetIconInfo(icon, &mut ii) }.is_ok() {
+        hx = ii.xHotspot as i32;
+        hy = ii.yHotspot as i32;
+        if !ii.hbmMask.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(ii.hbmMask.0));
+            }
+        }
+        if !ii.hbmColor.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(ii.hbmColor.0));
+            }
+        }
+    }
+    let rel_x = ci.ptScreenPos.x - bounds.left - hx;
+    let rel_y = ci.ptScreenPos.y - bounds.top - hy;
+    if rel_x + 128 < 0 || rel_y + 128 < 0 || rel_x >= bounds.width || rel_y >= bounds.height {
+        return;
+    }
+    unsafe {
+        let _ = DrawIconEx(mem_dc, rel_x, rel_y, icon, 0, 0, 0, None, DI_NORMAL);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn composite_dxgi_pointer_over_bgra(
+    dst_bgra: &mut [u8],
+    dst_w: usize,
+    dst_h: usize,
+    dst_pitch: usize,
+    region_x: i32,
+    region_y: i32,
+    ptr_x: i32,
+    ptr_y: i32,
+    shape: &PointerShapeDesc,
+    shape_data: &[u8],
+) {
+    let shape_w = shape.width as i32;
+    let logical_h = if shape.pointer_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32 {
+        (shape.height / 2) as i32
+    } else {
+        shape.height as i32
+    };
+    let shape_pitch = shape.pitch as usize;
+    if shape_w <= 0 || logical_h <= 0 || shape_pitch == 0 {
+        return;
+    }
+
+    for sy in 0..logical_h {
+        let dy = ptr_y + sy - region_y;
+        if dy < 0 || (dy as usize) >= dst_h {
+            continue;
+        }
+        let dst_row_off = (dy as usize) * dst_pitch;
+        for sx in 0..shape_w {
+            let dx = ptr_x + sx - region_x;
+            if dx < 0 || (dx as usize) >= dst_w {
+                continue;
+            }
+            let dp = dst_row_off + (dx as usize) * 4;
+            if dp + 3 >= dst_bgra.len() {
+                continue;
+            }
+
+            if shape.pointer_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32 {
+                let and_off = (sy as usize) * shape_pitch + (sx as usize) / 8;
+                let xor_off = ((sy + logical_h) as usize) * shape_pitch + (sx as usize) / 8;
+                if xor_off >= shape_data.len() {
+                    continue;
+                }
+                let mask = 0x80u8 >> ((sx as usize) & 7);
+                let and_set = (shape_data[and_off] & mask) != 0;
+                let xor_set = (shape_data[xor_off] & mask) != 0;
+                match (and_set, xor_set) {
+                    (false, false) => {
+                        dst_bgra[dp] = 0;
+                        dst_bgra[dp + 1] = 0;
+                        dst_bgra[dp + 2] = 0;
+                        dst_bgra[dp + 3] = 255;
+                    }
+                    (false, true) => {
+                        dst_bgra[dp] = 255;
+                        dst_bgra[dp + 1] = 255;
+                        dst_bgra[dp + 2] = 255;
+                        dst_bgra[dp + 3] = 255;
+                    }
+                    (true, true) => {
+                        dst_bgra[dp] ^= 0xFF;
+                        dst_bgra[dp + 1] ^= 0xFF;
+                        dst_bgra[dp + 2] ^= 0xFF;
+                    }
+                    (true, false) => {}
+                }
+            } else if shape.pointer_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32 {
+                let sp = (sy as usize) * shape_pitch + (sx as usize) * 4;
+                if sp + 3 >= shape_data.len() {
+                    continue;
+                }
+                let a = u16::from(shape_data[sp + 3]);
+                if a == 0 {
+                    continue;
+                }
+                let inv_a = 255 - a;
+                for c in 0..3 {
+                    let s_val = u16::from(shape_data[sp + c]);
+                    let d_val = u16::from(dst_bgra[dp + c]);
+                    dst_bgra[dp + c] = (s_val + ((d_val * inv_a + 127) / 255)).min(255) as u8;
+                }
+                dst_bgra[dp + 3] = 255;
+            } else if shape.pointer_type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 as u32 {
+                let sp = (sy as usize) * shape_pitch + (sx as usize) * 4;
+                if sp + 3 >= shape_data.len() {
+                    continue;
+                }
+                if shape_data[sp + 3] != 0 {
+                    dst_bgra[dp] ^= shape_data[sp];
+                    dst_bgra[dp + 1] ^= shape_data[sp + 1];
+                    dst_bgra[dp + 2] ^= shape_data[sp + 2];
+                } else {
+                    dst_bgra[dp] = shape_data[sp];
+                    dst_bgra[dp + 1] = shape_data[sp + 1];
+                    dst_bgra[dp + 2] = shape_data[sp + 2];
+                    dst_bgra[dp + 3] = 255;
+                }
+            }
+        }
+    }
 }
 
 fn try_duplicate_with_brief_retry(
@@ -768,13 +1191,8 @@ fn try_create_gpu_converter(
         video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&dst_rect));
     }
 
-    let (capture_tex, input_view) = create_input_tex_and_view(
-        device,
-        &video_device,
-        &video_enum,
-        src_w,
-        src_h,
-    )?;
+    let (capture_tex, input_view) =
+        create_input_tex_and_view(device, &video_device, &video_enum, src_w, src_h)?;
 
     let nv12_gpu_tex = create_texture(
         device,

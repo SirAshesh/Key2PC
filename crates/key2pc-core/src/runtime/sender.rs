@@ -102,6 +102,7 @@ impl SenderRuntime {
             display_fullscreen: config.display.enabled
                 && config.display.open_viewer_on_start
                 && config.display.fullscreen,
+            display_fill_screen: config.display.enabled && config.display.fill_screen,
             display_hotkey_label,
             display_fullscreen_hotkey_label,
             virtual_driver_installed: false,
@@ -138,6 +139,16 @@ impl SenderRuntime {
                 };
                 fs_observer(&snap);
             });
+            let fill_status = Arc::clone(&status);
+            let fill_observer = Arc::clone(&observer);
+            let on_fill: Arc<dyn Fn(bool) + Send + Sync> = Arc::new(move |fill_screen| {
+                let snap = {
+                    let mut st = fill_status.lock().unwrap();
+                    st.display_fill_screen = fill_screen;
+                    st.clone()
+                };
+                fill_observer(&snap);
+            });
 
             let host = VideoViewerHost::start(
                 config,
@@ -146,6 +157,7 @@ impl SenderRuntime {
                 on_focus,
                 on_vis,
                 on_fs,
+                on_fill,
             )?;
             Some(Arc::new(Mutex::new(host)))
         } else {
@@ -236,6 +248,14 @@ impl ManagedService for SenderRuntime {
         if let Some(host) = &self.video_host {
             if let Ok(guard) = host.lock() {
                 guard.toggle_fullscreen();
+            }
+        }
+    }
+
+    fn toggle_fill_screen(&self) {
+        if let Some(host) = &self.video_host {
+            if let Ok(guard) = host.lock() {
+                guard.toggle_fill_screen();
             }
         }
     }
@@ -348,8 +368,7 @@ fn spawn_sender_rx_thread(
                                         state_changed = true;
                                     }
                                     if pkt.timestamp_us <= now_us {
-                                        let sample_ms =
-                                            (now_us - pkt.timestamp_us) as f32 / 1000.0;
+                                        let sample_ms = (now_us - pkt.timestamp_us) as f32 / 1000.0;
                                         if sample_ms < 5000.0 {
                                             update_rtt_ewma(&mut guard.rtt_ms, sample_ms);
                                             rtt_updated = true;
@@ -373,7 +392,8 @@ fn spawn_sender_rx_thread(
                                         guard.connected = true;
                                         state_changed = true;
                                         let seq = next_seq.fetch_add(1, Ordering::Relaxed);
-                                        let ping = Packet::ping(seq, now_us, true).encode(&auth_key);
+                                        let ping =
+                                            Packet::ping(seq, now_us, true).encode(&auth_key);
                                         let _ = socket.send_to(&ping, peer);
                                     }
                                 }
@@ -598,10 +618,8 @@ fn spawn_sender_tx_thread(
                             &req,
                             SocketAddr::new(last_peer.ip(), config.network.discovery_port),
                         );
-                        let _ = socket.send_to(
-                            &req,
-                            SocketAddr::new(last_peer.ip(), config.network.port),
-                        );
+                        let _ = socket
+                            .send_to(&req, SocketAddr::new(last_peer.ip(), config.network.port));
                     }
                     for bcast in enumerate_broadcast_targets(config.network.discovery_port) {
                         let _ = socket.send_to(&req, bcast);

@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
     ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET,
     D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-    D3D11_MAP_WRITE, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
@@ -41,16 +41,19 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_F11, VK_RETURN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, VK_F10, VK_F11, VK_RETURN,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongW, GetWindowRect, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetWindowLongW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, CW_USEDEFAULT,
-    GWL_STYLE, HWND_TOP, IDC_ARROW, MSG, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER,
-    SW_HIDE, SW_SHOW, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN,
-    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    SetCursor, SetWindowLongW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    CW_USEDEFAULT, GWL_STYLE, HTCLIENT, HWND_TOP, IDC_ARROW, MSG, SWP_FRAMECHANGED,
+    SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::display::DecodedFrame;
@@ -67,6 +70,8 @@ pub enum ViewerCommand {
     ToggleVisible,
     ToggleFullscreen,
     SetFullscreen(bool),
+    ToggleFillScreen,
+    SetFillScreen(bool),
     Shutdown,
 }
 
@@ -76,6 +81,7 @@ pub enum ViewerEvent {
     VisibilityChanged(bool),
     FocusChanged(bool),
     FullscreenChanged(bool),
+    FillScreenChanged(bool),
 }
 
 pub struct ViewerOptions {
@@ -83,6 +89,7 @@ pub struct ViewerOptions {
     pub initial_height: u32,
     pub start_visible: bool,
     pub start_fullscreen: bool,
+    pub fill_screen: bool,
     pub capture_mouse: bool,
 }
 
@@ -90,6 +97,7 @@ pub struct DisplayViewer {
     hwnd_raw: isize,
     visible: Arc<AtomicBool>,
     fullscreen: Arc<AtomicBool>,
+    fill_screen: Arc<AtomicBool>,
     latest_frame: Arc<Mutex<Option<DecodedFrame>>>,
     status_text: Arc<Mutex<String>>,
     command_tx: Sender<ViewerCommand>,
@@ -104,7 +112,7 @@ impl DisplayViewer {
         let latest_frame = Arc::new(Mutex::new(None));
         let frame_slot = Arc::clone(&latest_frame);
         let status_text = Arc::new(Mutex::new(
-            "Waiting for PC connection on local network...\nPress F11, Alt+Enter, or Ctrl+Alt+F for Fullscreen"
+            "Waiting for PC connection on local network...\nPress F11 / Alt+Enter / Ctrl+Alt+F: Fullscreen | F10: Stretch Fill"
                 .to_string(),
         ));
         let status_slot = Arc::clone(&status_text);
@@ -112,6 +120,8 @@ impl DisplayViewer {
         let visible_flag = Arc::clone(&visible);
         let fullscreen = Arc::new(AtomicBool::new(options.start_fullscreen));
         let fullscreen_flag = Arc::clone(&fullscreen);
+        let fill_screen = Arc::new(AtomicBool::new(options.fill_screen));
+        let fill_flag = Arc::clone(&fill_screen);
 
         let handle = thread::Builder::new()
             .name("key2pc-viewer".to_string())
@@ -126,6 +136,7 @@ impl DisplayViewer {
                         status_text: status_slot,
                         visible: visible_flag,
                         fullscreen_flag,
+                        fill_flag,
                         command_rx,
                         event_tx,
                     },
@@ -145,6 +156,7 @@ impl DisplayViewer {
                 hwnd_raw,
                 visible,
                 fullscreen,
+                fill_screen,
                 latest_frame,
                 status_text,
                 command_tx,
@@ -156,6 +168,10 @@ impl DisplayViewer {
 
     pub fn is_fullscreen(&self) -> bool {
         self.fullscreen.load(Ordering::Acquire)
+    }
+
+    pub fn is_fill_screen(&self) -> bool {
+        self.fill_screen.load(Ordering::Acquire)
     }
 
     pub fn set_status_text(&self, text: impl Into<String>) {
@@ -235,6 +251,7 @@ struct D3dRenderer {
     nv12_gpu: Option<ID3D11Texture2D>,
     input_view: Option<ID3D11VideoProcessorInputView>,
     bgra_fallback_staging: Option<ID3D11Texture2D>,
+    fill_screen: bool,
     src_width: u32,
     src_height: u32,
     win_width: u32,
@@ -243,7 +260,7 @@ struct D3dRenderer {
 }
 
 impl D3dRenderer {
-    fn new(hwnd: HWND, win_width: u32, win_height: u32) -> Result<Self> {
+    fn new(hwnd: HWND, win_width: u32, win_height: u32, fill_screen: bool) -> Result<Self> {
         let (device, context) = create_viewer_d3d11_device()?;
         let video_device = device.cast::<ID3D11VideoDevice>().ok();
         let video_context = context.cast::<ID3D11VideoContext>().ok();
@@ -294,10 +311,11 @@ impl D3dRenderer {
             Flags: swap_flags,
         };
 
-        let swap_chain = unsafe {
-            factory.CreateSwapChainForHwnd(&device, hwnd, &swap_desc, None, None)
-        }
-        .map_err(|err| Key2PcError::Display(format!("CreateSwapChainForHwnd failed: {err}")))?;
+        let swap_chain =
+            unsafe { factory.CreateSwapChainForHwnd(&device, hwnd, &swap_desc, None, None) }
+                .map_err(|err| {
+                    Key2PcError::Display(format!("CreateSwapChainForHwnd failed: {err}"))
+                })?;
 
         let mut renderer = Self {
             hwnd,
@@ -315,6 +333,7 @@ impl D3dRenderer {
             nv12_gpu: None,
             input_view: None,
             bgra_fallback_staging: None,
+            fill_screen,
             src_width: 0,
             src_height: 0,
             win_width: win_width.max(1),
@@ -521,8 +540,11 @@ impl D3dRenderer {
         let backbuffer: ID3D11Texture2D = unsafe { self.swap_chain.GetBuffer(0) }
             .map_err(|err| Key2PcError::Display(format!("SwapChain GetBuffer failed: {err}")))?;
         let mut rtv: Option<ID3D11RenderTargetView> = None;
-        unsafe { self.device.CreateRenderTargetView(&backbuffer, None, Some(&mut rtv)) }
-            .map_err(|err| Key2PcError::Display(format!("CreateRenderTargetView failed: {err}")))?;
+        unsafe {
+            self.device
+                .CreateRenderTargetView(&backbuffer, None, Some(&mut rtv))
+        }
+        .map_err(|err| Key2PcError::Display(format!("CreateRenderTargetView failed: {err}")))?;
         self.backbuffer_rtv = rtv;
 
         if let (Some(video_device), Some(video_enum)) = (&self.video_device, &self.video_enum) {
@@ -542,7 +564,9 @@ impl D3dRenderer {
                 )
             }
             .map_err(|err| {
-                Key2PcError::Display(format!("Viewer CreateVideoProcessorOutputView failed: {err}"))
+                Key2PcError::Display(format!(
+                    "Viewer CreateVideoProcessorOutputView failed: {err}"
+                ))
             })?;
             self.output_view = out_view;
         }
@@ -576,8 +600,11 @@ impl D3dRenderer {
             MiscFlags: 0,
         };
         let mut staging: Option<ID3D11Texture2D> = None;
-        unsafe { self.device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }
-            .map_err(|err| Key2PcError::Display(format!("Create NV12 staging failed: {err}")))?;
+        unsafe {
+            self.device
+                .CreateTexture2D(&staging_desc, None, Some(&mut staging))
+        }
+        .map_err(|err| Key2PcError::Display(format!("Create NV12 staging failed: {err}")))?;
 
         let gpu_desc = D3D11_TEXTURE2D_DESC {
             Usage: D3D11_USAGE_DEFAULT,
@@ -602,7 +629,16 @@ impl D3dRenderer {
         self.output_view = None;
         self.processor = None;
         self.video_enum = None;
-        self.dest_rect = compute_aspect_rect(src_w, src_h, self.win_width, self.win_height);
+        self.dest_rect = if self.fill_screen {
+            RECT {
+                left: 0,
+                top: 0,
+                right: self.win_width as i32,
+                bottom: self.win_height as i32,
+            }
+        } else {
+            compute_aspect_rect(src_w, src_h, self.win_width, self.win_height)
+        };
 
         let (Some(video_device), Some(video_context)) =
             (self.video_device.clone(), self.video_context.clone())
@@ -627,7 +663,8 @@ impl D3dRenderer {
             Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
         };
 
-        let Ok(video_enum) = (unsafe { video_device.CreateVideoProcessorEnumerator(&content_desc) })
+        let Ok(video_enum) =
+            (unsafe { video_device.CreateVideoProcessorEnumerator(&content_desc) })
         else {
             self.disable_gpu_video_processor();
             return Ok(());
@@ -661,9 +698,14 @@ impl D3dRenderer {
         }
 
         if let Some(gpu_tex) = &self.nv12_gpu {
-            if let Some(view) =
-                try_create_viewer_input_view(&self.device, &video_device, &video_enum, gpu_tex, src_w, src_h)
-            {
+            if let Some(view) = try_create_viewer_input_view(
+                &self.device,
+                &video_device,
+                &video_enum,
+                gpu_tex,
+                src_w,
+                src_h,
+            ) {
                 match view {
                     InputViewCreation::Reused(in_view) => self.input_view = Some(in_view),
                     InputViewCreation::Replaced(new_tex, in_view) => {
@@ -847,13 +889,16 @@ fn nv12_to_bgra_scaled(
 struct ViewerWindowState {
     renderer: D3dRenderer,
     latest_frame: Arc<Mutex<Option<DecodedFrame>>>,
+    last_rendered: Option<DecodedFrame>,
     status_text: Arc<Mutex<String>>,
     has_frame: bool,
     visible: Arc<AtomicBool>,
     fullscreen_flag: Arc<AtomicBool>,
+    fill_flag: Arc<AtomicBool>,
     command_rx: Receiver<ViewerCommand>,
     event_tx: Sender<ViewerEvent>,
     capture_mouse: bool,
+    focused: bool,
     fullscreen: bool,
     saved_windowed_rect: RECT,
     saved_style: i32,
@@ -863,6 +908,29 @@ struct ViewerWindowState {
 }
 
 impl ViewerWindowState {
+    fn set_fill_screen(&mut self, enable: bool) {
+        if self.renderer.fill_screen == enable {
+            return;
+        }
+        self.renderer.fill_screen = enable;
+        self.fill_flag.store(enable, Ordering::Release);
+        if self.renderer.src_width > 0 && self.renderer.src_height > 0 {
+            let _ = self
+                .renderer
+                .rebuild_processor(self.renderer.src_width, self.renderer.src_height);
+        }
+        if let Some(frame) = &self.last_rendered {
+            let _ = self.renderer.render_nv12(frame);
+        }
+        let _ = self
+            .event_tx
+            .try_send(ViewerEvent::FillScreenChanged(enable));
+    }
+
+    fn toggle_fill_screen(&mut self) {
+        let next = !self.renderer.fill_screen;
+        self.set_fill_screen(next);
+    }
     fn set_fullscreen(&mut self, hwnd: HWND, enable: bool) {
         if enable && !self.visible.load(Ordering::Acquire) {
             self.set_visible(hwnd, true);
@@ -913,7 +981,8 @@ impl ViewerWindowState {
             }
             self.fullscreen = false;
         }
-        self.fullscreen_flag.store(self.fullscreen, Ordering::Release);
+        self.fullscreen_flag
+            .store(self.fullscreen, Ordering::Release);
         let _ = self
             .event_tx
             .try_send(ViewerEvent::FullscreenChanged(self.fullscreen));
@@ -980,6 +1049,7 @@ struct ViewerLoopInit {
     status_text: Arc<Mutex<String>>,
     visible: Arc<AtomicBool>,
     fullscreen_flag: Arc<AtomicBool>,
+    fill_flag: Arc<AtomicBool>,
     command_rx: Receiver<ViewerCommand>,
     event_tx: Sender<ViewerEvent>,
 }
@@ -991,6 +1061,7 @@ fn run_viewer_loop(init: ViewerLoopInit, ready_tx: &Sender<Result<isize>>) -> Re
         status_text,
         visible,
         fullscreen_flag,
+        fill_flag,
         command_rx,
         event_tx,
     } = init;
@@ -1019,7 +1090,7 @@ fn run_viewer_loop(init: ViewerLoopInit, ready_tx: &Sender<Result<isize>>) -> Re
         CreateWindowExW(
             Default::default(),
             class_name,
-            w!("Key2PC Second Screen | F11 or Alt+Enter Fullscreen"),
+            w!("Key2PC Second Screen | F11 Fullscreen | F10 Stretch Fill"),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -1037,18 +1108,21 @@ fn run_viewer_loop(init: ViewerLoopInit, ready_tx: &Sender<Result<isize>>) -> Re
     let _ = unsafe { GetClientRect(hwnd, &mut client_rect) };
     let win_w = (client_rect.right - client_rect.left).max(1) as u32;
     let win_h = (client_rect.bottom - client_rect.top).max(1) as u32;
-    let renderer = D3dRenderer::new(hwnd, win_w, win_h)?;
+    let renderer = D3dRenderer::new(hwnd, win_w, win_h, options.fill_screen)?;
 
     let mut state = Box::new(ViewerWindowState {
         renderer,
         latest_frame,
+        last_rendered: None,
         status_text,
         has_frame: false,
         visible,
         fullscreen_flag,
+        fill_flag,
         command_rx,
         event_tx,
         capture_mouse: options.capture_mouse,
+        focused: options.start_visible,
         fullscreen: false,
         saved_windowed_rect: RECT {
             left: 100,
@@ -1116,16 +1190,19 @@ unsafe extern "system" fn viewer_wnd_proc(
                 if state.renderer.render_nv12(&frame).is_ok() {
                     state.has_frame = true;
                     state.update_fps_title(hwnd, w, h);
+                    state.last_rendered = Some(frame);
                 } else {
                     let mut rect = RECT::default();
                     let _ = unsafe { GetClientRect(hwnd, &mut rect) };
                     let rw = (rect.right - rect.left).max(1) as u32;
                     let rh = (rect.bottom - rect.top).max(1) as u32;
-                    if let Ok(fresh) = D3dRenderer::new(hwnd, rw, rh) {
+                    let fill = state.renderer.fill_screen;
+                    if let Ok(fresh) = D3dRenderer::new(hwnd, rw, rh, fill) {
                         state.renderer = fresh;
                         if state.renderer.render_nv12(&frame).is_ok() {
                             state.has_frame = true;
                             state.update_fps_title(hwnd, w, h);
+                            state.last_rendered = Some(frame);
                         }
                     }
                 }
@@ -1198,6 +1275,8 @@ unsafe extern "system" fn viewer_wnd_proc(
                     }
                     ViewerCommand::ToggleFullscreen => state.toggle_fullscreen(hwnd),
                     ViewerCommand::SetFullscreen(enable) => state.set_fullscreen(hwnd, enable),
+                    ViewerCommand::ToggleFillScreen => state.toggle_fill_screen(),
+                    ViewerCommand::SetFillScreen(enable) => state.set_fill_screen(enable),
                     ViewerCommand::Shutdown => unsafe {
                         let _ = DestroyWindow(hwnd);
                     },
@@ -1209,23 +1288,43 @@ unsafe extern "system" fn viewer_wnd_proc(
             let w = (lparam.0 & 0xFFFF) as u32;
             let h = ((lparam.0 >> 16) & 0xFFFF) as u32;
             let _ = state.renderer.resize(w, h);
+            if let Some(frame) = &state.last_rendered {
+                let _ = state.renderer.render_nv12(frame);
+            }
             LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            let hit = (lparam.0 & 0xFFFF) as u32;
+            if hit == HTCLIENT && state.has_frame && state.capture_mouse && state.focused {
+                unsafe {
+                    SetCursor(None);
+                }
+                return LRESULT(1);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let is_alt = (lparam.0 & (1 << 29)) != 0;
             let is_f11 = wparam.0 == usize::from(VK_F11.0);
+            let is_f10 = wparam.0 == usize::from(VK_F10.0);
             let is_alt_enter = wparam.0 == usize::from(VK_RETURN.0) && is_alt;
             if is_f11 || is_alt_enter {
                 state.toggle_fullscreen(hwnd);
                 return LRESULT(0);
             }
+            if is_f10 {
+                state.toggle_fill_screen();
+                return LRESULT(0);
+            }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_SETFOCUS => {
+            state.focused = true;
             let _ = state.event_tx.try_send(ViewerEvent::FocusChanged(true));
             LRESULT(0)
         }
         WM_KILLFOCUS => {
+            state.focused = false;
             let _ = state.event_tx.try_send(ViewerEvent::FocusChanged(false));
             LRESULT(0)
         }

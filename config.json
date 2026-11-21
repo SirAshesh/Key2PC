@@ -58,9 +58,11 @@
     "monitor": "auto",
     "width": 1920,
     "height": 1080,
+    "match_source_resolution": true,
     "fps": 60,
     "bitrate_kbps": 16000,
     "fullscreen": false,
+    "fill_screen": false,
     "open_viewer_on_start": true,
     "capture_mouse": true,
     "auto_forward_on_viewer_focus": true

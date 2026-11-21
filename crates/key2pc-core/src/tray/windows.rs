@@ -16,6 +16,7 @@ pub enum TrayAction {
     ToggleForwarding,
     ToggleDisplay,
     ToggleFullscreen,
+    ToggleFillScreen,
     ToggleVirtualMonitor,
     InstallVirtualDriver,
     ReleaseAll,
@@ -29,6 +30,7 @@ pub struct TrayController {
     toggle_item: CheckMenuItem,
     display_item: CheckMenuItem,
     fullscreen_item: CheckMenuItem,
+    fill_screen_item: CheckMenuItem,
     release_item: MenuItem,
     virtual_monitor_item: CheckMenuItem,
     install_vdd_item: MenuItem,
@@ -44,7 +46,8 @@ impl TrayController {
     ) -> Result<(Self, Receiver<TrayAction>)> {
         let menu = Menu::new();
         let status_item = MenuItem::new("Key2PC", false, None);
-        let is_sender_ok = initial_status.role == Role::Sender && initial_status.error_message.is_none();
+        let is_sender_ok =
+            initial_status.role == Role::Sender && initial_status.error_message.is_none();
         let is_receiver_ok =
             initial_status.role == Role::Receiver && initial_status.error_message.is_none();
         let toggle_item = CheckMenuItem::new(
@@ -63,6 +66,12 @@ impl TrayController {
             format_fullscreen_label(initial_status),
             is_sender_ok && initial_status.display_enabled,
             initial_status.display_visible && initial_status.display_fullscreen,
+            None,
+        );
+        let fill_screen_item = CheckMenuItem::new(
+            "Fill Screen Without Bars (F10)",
+            is_sender_ok && initial_status.display_enabled,
+            is_sender_ok && initial_status.display_enabled && initial_status.display_fill_screen,
             None,
         );
         let release_item = MenuItem::new("Release All Remote Keys", is_sender_ok, None);
@@ -91,6 +100,8 @@ impl TrayController {
         menu.append(&display_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
         menu.append(&fullscreen_item)
+            .map_err(|err| Key2PcError::Tray(err.to_string()))?;
+        menu.append(&fill_screen_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
         menu.append(&release_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
@@ -123,6 +134,7 @@ impl TrayController {
         let toggle_id: MenuId = toggle_item.id().clone();
         let display_id: MenuId = display_item.id().clone();
         let fullscreen_id: MenuId = fullscreen_item.id().clone();
+        let fill_screen_id: MenuId = fill_screen_item.id().clone();
         let release_id: MenuId = release_item.id().clone();
         let virtual_mon_id: MenuId = virtual_monitor_item.id().clone();
         let install_vdd_id: MenuId = install_vdd_item.id().clone();
@@ -137,6 +149,8 @@ impl TrayController {
                 Some(TrayAction::ToggleDisplay)
             } else if event.id == fullscreen_id {
                 Some(TrayAction::ToggleFullscreen)
+            } else if event.id == fill_screen_id {
+                Some(TrayAction::ToggleFillScreen)
             } else if event.id == virtual_mon_id {
                 Some(TrayAction::ToggleVirtualMonitor)
             } else if event.id == install_vdd_id {
@@ -162,6 +176,7 @@ impl TrayController {
             toggle_item,
             display_item,
             fullscreen_item,
+            fill_screen_item,
             release_item,
             virtual_monitor_item,
             install_vdd_item,
@@ -203,7 +218,13 @@ impl TrayController {
             .set_enabled(is_sender_ok && status.display_enabled);
         self.fullscreen_item
             .set_checked(is_sender_ok && status.display_visible && status.display_fullscreen);
-        self.fullscreen_item.set_text(format_fullscreen_label(status));
+        self.fullscreen_item
+            .set_text(format_fullscreen_label(status));
+
+        self.fill_screen_item
+            .set_enabled(is_sender_ok && status.display_enabled);
+        self.fill_screen_item
+            .set_checked(is_sender_ok && status.display_enabled && status.display_fill_screen);
 
         self.virtual_monitor_item.set_enabled(
             is_receiver_ok && status.display_enabled && status.virtual_driver_installed,
@@ -271,7 +292,11 @@ fn format_status_line(status: &ServiceStatus) -> String {
     }
     match status.role {
         Role::Sender => {
-            let mode = if status.active { "Active -> PC" } else { "Local Laptop" };
+            let mode = if status.active {
+                "Active -> PC"
+            } else {
+                "Local Laptop"
+            };
             match (status.connected, status.peer_address, status.rtt_ms) {
                 (true, Some(addr), Some(rtt)) => format!("{mode} | {addr} ({rtt:.1} ms)"),
                 (true, Some(addr), None) => format!("{mode} | {addr}"),
@@ -309,7 +334,11 @@ fn format_tooltip(status: &ServiceStatus, show_latency: bool) -> String {
                     return format!("Key2PC Sender ({mode}) -> {peer} [{rtt:.1} ms]");
                 }
             }
-            let state = if status.connected { "Online" } else { "Offline" };
+            let state = if status.connected {
+                "Online"
+            } else {
+                "Offline"
+            };
             format!("Key2PC Sender ({mode}) -> {peer} [{state}]")
         }
         Role::Receiver => {

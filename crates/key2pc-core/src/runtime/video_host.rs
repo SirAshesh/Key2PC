@@ -8,8 +8,8 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::config::AppConfig;
 use crate::display::{
-    CaptureResult, DisplayViewer, DxgiScreenCapturer, MfH264Decoder, MfH264Encoder,
-    ScreenCapturer, VideoDecoder, VideoEncoder, ViewerCommand, ViewerEvent, ViewerOptions,
+    CaptureResult, DisplayViewer, DxgiScreenCapturer, MfH264Decoder, MfH264Encoder, ScreenCapturer,
+    VideoDecoder, VideoEncoder, ViewerCommand, ViewerEvent, ViewerOptions,
 };
 use crate::error::Result;
 use crate::input::{boost_current_thread_priority, DesktopBounds, HookEvent};
@@ -180,6 +180,7 @@ fn run_video_streamer_loop(
 ) {
     let mut capturer: Option<DxgiScreenCapturer> = None;
     let mut encoder: Option<MfH264Encoder> = None;
+    let mut encoded_size = (0u32, 0u32);
     let mut observed_epoch = capture_epoch.load(Ordering::Acquire);
     let mut nv12_buf = Vec::with_capacity((cfg.width * cfg.height * 3 / 2) as usize);
     let mut frame_id = 1u32;
@@ -223,15 +224,24 @@ fn run_video_streamer_loop(
         let Some(viewer_addr) = viewer_opt else {
             capturer = None;
             encoder = None;
+            encoded_size = (0, 0);
             pending_keyframe = true;
             thread::sleep(Duration::from_millis(40));
             continue;
         };
 
         if capturer.is_none() {
-            match DxgiScreenCapturer::new(&cfg.monitor, cfg.width, cfg.height) {
+            match DxgiScreenCapturer::new_with_mode(
+                &cfg.monitor,
+                cfg.width,
+                cfg.height,
+                cfg.match_source_resolution,
+            ) {
                 Ok(cap) => {
                     bounds_callback(cap.bounds());
+                    if cap.target_size() != encoded_size {
+                        encoder = None;
+                    }
                     capturer = Some(cap);
                     pending_keyframe = true;
                     idle_capture_started_at = Instant::now();
@@ -252,6 +262,7 @@ fn run_video_streamer_loop(
             match MfH264Encoder::new(tw, th, cfg.fps, cfg.bitrate_kbps) {
                 Ok(enc) => {
                     encoder = Some(enc);
+                    encoded_size = (tw, th);
                     pending_keyframe = true;
                 }
                 Err(err) => {
@@ -303,7 +314,11 @@ fn run_video_streamer_loop(
             }
             Ok(CaptureResult::Reinitialized) => {
                 bounds_callback(cap.bounds());
-                enc.force_keyframe();
+                if cap.target_size() != encoded_size {
+                    encoder = None;
+                } else {
+                    enc.force_keyframe();
+                }
                 pending_keyframe = true;
                 nv12_buf.clear();
                 idle_capture_started_at = Instant::now();
@@ -365,6 +380,7 @@ pub struct VideoViewerHost {
 }
 
 impl VideoViewerHost {
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         config: &AppConfig,
         initial_peer_video: Option<SocketAddr>,
@@ -372,6 +388,7 @@ impl VideoViewerHost {
         on_focus_active: Arc<dyn Fn(bool) + Send + Sync>,
         on_visibility_changed: Arc<dyn Fn(bool) + Send + Sync>,
         on_fullscreen_changed: Arc<dyn Fn(bool) + Send + Sync>,
+        on_fill_screen_changed: Arc<dyn Fn(bool) + Send + Sync>,
     ) -> Result<Self> {
         let bind_ip: IpAddr = config
             .network
@@ -392,6 +409,7 @@ impl VideoViewerHost {
             initial_height: config.display.height,
             start_visible: config.display.open_viewer_on_start,
             start_fullscreen: config.display.fullscreen,
+            fill_screen: config.display.fill_screen,
             capture_mouse: config.display.capture_mouse,
         })?;
         let viewer = Arc::new(viewer);
@@ -412,13 +430,7 @@ impl VideoViewerHost {
             .spawn(move || {
                 boost_current_thread_priority(true);
                 run_video_viewer_rx_loop(
-                    rx_running,
-                    rx_socket,
-                    rx_peer,
-                    rx_viewer,
-                    auth_key,
-                    cfg_w,
-                    cfg_h,
+                    rx_running, rx_socket, rx_peer, rx_viewer, auth_key, cfg_w, cfg_h,
                 );
             })?;
 
@@ -440,6 +452,7 @@ impl VideoViewerHost {
                     on_focus_active,
                     on_visibility_changed,
                     on_fullscreen_changed,
+                    on_fill_screen_changed,
                 );
             })?;
 
@@ -464,6 +477,10 @@ impl VideoViewerHost {
 
     pub fn toggle_fullscreen(&self) {
         self.viewer.send_command(ViewerCommand::ToggleFullscreen);
+    }
+
+    pub fn toggle_fill_screen(&self) {
+        self.viewer.send_command(ViewerCommand::ToggleFillScreen);
     }
 
     pub fn shutdown(&mut self) {
@@ -703,6 +720,7 @@ fn run_viewer_event_bridge(
     on_focus_active: Arc<dyn Fn(bool) + Send + Sync>,
     on_visibility_changed: Arc<dyn Fn(bool) + Send + Sync>,
     on_fullscreen_changed: Arc<dyn Fn(bool) + Send + Sync>,
+    on_fill_screen_changed: Arc<dyn Fn(bool) + Send + Sync>,
 ) {
     let mut control_buf = Vec::with_capacity(64);
     while running.load(Ordering::Acquire) {
@@ -717,6 +735,9 @@ fn run_viewer_event_bridge(
             }
             Ok(ViewerEvent::FullscreenChanged(fullscreen)) => {
                 on_fullscreen_changed(fullscreen);
+            }
+            Ok(ViewerEvent::FillScreenChanged(fill_screen)) => {
+                on_fill_screen_changed(fill_screen);
             }
             Ok(ViewerEvent::VisibilityChanged(visible)) => {
                 on_visibility_changed(visible);

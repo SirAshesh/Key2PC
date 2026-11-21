@@ -102,6 +102,7 @@ impl ReceiverRuntime {
             display_enabled: config.display.enabled,
             display_visible: false,
             display_fullscreen: false,
+            display_fill_screen: false,
             display_hotkey_label: String::new(),
             display_fullscreen_hotkey_label: String::new(),
             virtual_driver_installed: drv_status.is_ready(),
@@ -360,6 +361,7 @@ impl ManagedService for ReceiverRuntime {
     fn set_active(&self, _active: bool) {}
     fn toggle_display(&self) {}
     fn toggle_fullscreen(&self) {}
+    fn toggle_fill_screen(&self) {}
 
     fn toggle_virtual_monitor(&self) {
         if !self.display_cfg.enabled {
@@ -406,10 +408,7 @@ impl ManagedService for ReceiverRuntime {
                             st.virtual_driver_installed = true;
                         }
                         if cfg.enabled && cfg.virtual_monitor {
-                            let is_active = guard_slot
-                                .lock()
-                                .map(|g| g.is_some())
-                                .unwrap_or(false);
+                            let is_active = guard_slot.lock().map(|g| g.is_some()).unwrap_or(false);
                             if !is_active {
                                 toggle_virtual_monitor_sync(
                                     &cfg,

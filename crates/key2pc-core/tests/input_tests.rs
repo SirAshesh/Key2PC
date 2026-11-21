@@ -36,18 +36,81 @@ fn toggle_hotkey_releases_local_modifiers_and_suppresses_orphaned_key_ups() {
         released_local.borrow_mut().extend_from_slice(keys);
     };
 
-    assert!(!processor.handle_key_raw(VK_LCONTROL, 0x1D, false, false, false, false, 0, &mut release_cb));
-    assert!(!processor.handle_key_raw(VK_LMENU, 0x38, false, false, true, false, 0, &mut release_cb));
+    assert!(!processor.handle_key_raw(
+        VK_LCONTROL,
+        0x1D,
+        false,
+        false,
+        false,
+        false,
+        0,
+        &mut release_cb
+    ));
+    assert!(!processor.handle_key_raw(
+        VK_LMENU,
+        0x38,
+        false,
+        false,
+        true,
+        false,
+        0,
+        &mut release_cb
+    ));
 
-    assert!(processor.handle_key_raw(b'K' as u16, 0x25, false, false, true, false, 0, &mut release_cb));
+    assert!(processor.handle_key_raw(
+        b'K' as u16,
+        0x25,
+        false,
+        false,
+        true,
+        false,
+        0,
+        &mut release_cb
+    ));
     assert!(processor.is_active());
     assert_eq!(released_local.borrow().len(), 2);
 
-    assert!(processor.handle_key_raw(b'K' as u16, 0x25, true, false, true, false, 0, &mut release_cb));
-    assert!(processor.handle_key_raw(VK_LMENU, 0x38, true, false, false, false, 0, &mut release_cb));
-    assert!(processor.handle_key_raw(VK_LCONTROL, 0x1D, true, false, false, false, 0, &mut release_cb));
+    assert!(processor.handle_key_raw(
+        b'K' as u16,
+        0x25,
+        true,
+        false,
+        true,
+        false,
+        0,
+        &mut release_cb
+    ));
+    assert!(processor.handle_key_raw(
+        VK_LMENU,
+        0x38,
+        true,
+        false,
+        false,
+        false,
+        0,
+        &mut release_cb
+    ));
+    assert!(processor.handle_key_raw(
+        VK_LCONTROL,
+        0x1D,
+        true,
+        false,
+        false,
+        false,
+        0,
+        &mut release_cb
+    ));
 
-    assert!(processor.handle_key_raw(b'W' as u16, 0x11, false, false, false, false, 0, &mut release_cb));
+    assert!(processor.handle_key_raw(
+        b'W' as u16,
+        0x11,
+        false,
+        false,
+        false,
+        false,
+        0,
+        &mut release_cb
+    ));
 
     let events: Vec<HookEvent> = rx.try_iter().collect();
     assert_eq!(
@@ -126,7 +189,7 @@ fn toggle_fullscreen_hotkey_emits_event_without_leaking_key() {
 
     let events: Vec<HookEvent> = rx.try_iter().collect();
     assert!(events.contains(&HookEvent::ToggleFullscreenRequested));
-    assert!(!events.iter().any(|ev| {
-        matches!(ev, HookEvent::Key(k) if k.vk == b'F' as u16)
-    }));
+    assert!(!events
+        .iter()
+        .any(|ev| { matches!(ev, HookEvent::Key(k) if k.vk == b'F' as u16) }));
 }

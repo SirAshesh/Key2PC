@@ -19,11 +19,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, GetSystemMetrics, KBDLLHOOKSTRUCT,
-    LLKHF_ALTDOWN, LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP, MSG, PostQuitMessage,
-    PostThreadMessageW, SetWindowsHookExW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP,
+    CallNextHookEx, DispatchMessageW, GetMessageW, GetSystemMetrics, PostQuitMessage,
+    PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, KBDLLHOOKSTRUCT,
+    LLKHF_ALTDOWN, LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP, MSG, SM_CXSCREEN, SM_CXVIRTUALSCREEN,
+    SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WH_KEYBOARD_LL, WM_APP,
 };
 
 use crate::error::{Key2PcError, Result};
@@ -95,12 +94,7 @@ fn build_key_input(
     }
 }
 
-fn build_mouse_input(
-    dx: i32,
-    dy: i32,
-    mouse_data: u32,
-    dw_flags: u32,
-) -> INPUT {
+fn build_mouse_input(dx: i32, dy: i32, mouse_data: u32, dw_flags: u32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -226,9 +220,11 @@ impl InputSink for WinInputInjector {
     fn handle_mouse(&mut self, event: MouseEvent) -> Result<()> {
         self.track_mouse_button(event.action);
         let virtual_bounds = query_virtual_desktop_bounds();
-        let (vx, vy) =
-            self.monitor_bounds
-                .map_normalized_to_virtual(event.norm_x, event.norm_y, virtual_bounds);
+        let (vx, vy) = self.monitor_bounds.map_normalized_to_virtual(
+            event.norm_x,
+            event.norm_y,
+            virtual_bounds,
+        );
         let abs_move = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
 
         let input = match event.action {
@@ -242,9 +238,7 @@ impl InputSink for WinInputInjector {
             MouseAction::MiddleDown => {
                 build_mouse_input(vx, vy, 0, abs_move | MOUSEEVENTF_MIDDLEDOWN)
             }
-            MouseAction::MiddleUp => {
-                build_mouse_input(vx, vy, 0, abs_move | MOUSEEVENTF_MIDDLEUP)
-            }
+            MouseAction::MiddleUp => build_mouse_input(vx, vy, 0, abs_move | MOUSEEVENTF_MIDDLEUP),
             MouseAction::X1Down => {
                 build_mouse_input(vx, vy, u32::from(XBUTTON1), abs_move | MOUSEEVENTF_XDOWN)
             }
@@ -303,10 +297,20 @@ impl InputSink for WinInputInjector {
             inputs.push(build_mouse_input(0, 0, 0, MOUSEEVENTF_MIDDLEUP));
         }
         if (self.held_mouse_buttons & (1 << 3)) != 0 {
-            inputs.push(build_mouse_input(0, 0, u32::from(XBUTTON1), MOUSEEVENTF_XUP));
+            inputs.push(build_mouse_input(
+                0,
+                0,
+                u32::from(XBUTTON1),
+                MOUSEEVENTF_XUP,
+            ));
         }
         if (self.held_mouse_buttons & (1 << 4)) != 0 {
-            inputs.push(build_mouse_input(0, 0, u32::from(XBUTTON2), MOUSEEVENTF_XUP));
+            inputs.push(build_mouse_input(
+                0,
+                0,
+                u32::from(XBUTTON2),
+                MOUSEEVENTF_XUP,
+            ));
         }
         self.held_mouse_buttons = 0;
 
@@ -354,11 +358,7 @@ impl WinKeyboardHook {
 
                 HOOK_STATE.with(|slot| {
                     *slot.borrow_mut() = Some(HookThreadContext {
-                        processor: HookProcessor::new(
-                            options,
-                            shared_active_clone,
-                            event_tx_clone,
-                        ),
+                        processor: HookProcessor::new(options, shared_active_clone, event_tx_clone),
                         control_rx,
                     });
                 });
@@ -461,11 +461,13 @@ fn drain_hook_controls() {
         while let Ok(cmd) = ctx.control_rx.try_recv() {
             match cmd {
                 HookControl::SetActive(next) => {
-                    ctx.processor.transition_active(next, &mut release_keys_locally);
+                    ctx.processor
+                        .transition_active(next, &mut release_keys_locally);
                 }
                 HookControl::ToggleActive => {
                     let next = !ctx.processor.is_active();
-                    ctx.processor.transition_active(next, &mut release_keys_locally);
+                    ctx.processor
+                        .transition_active(next, &mut release_keys_locally);
                 }
                 HookControl::ReleaseAllRemote => {
                     ctx.processor.request_release_all();
