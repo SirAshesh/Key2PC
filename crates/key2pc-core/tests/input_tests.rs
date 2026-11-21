@@ -19,6 +19,13 @@ fn toggle_hotkey_releases_local_modifiers_and_suppresses_orphaned_key_ups() {
             toggle_hotkey: HotkeyBinding::new(true, true, false, false, b'K' as u16),
             release_all_hotkey: HotkeyBinding::new(true, true, false, false, 0x1B),
             toggle_display_hotkey: Some(HotkeyBinding::new(true, true, false, false, b'D' as u16)),
+            toggle_fullscreen_hotkey: Some(HotkeyBinding::new(
+                true,
+                true,
+                false,
+                false,
+                b'F' as u16,
+            )),
         },
         shared,
         tx,
@@ -86,4 +93,40 @@ fn desktop_bounds_maps_extended_monitor_coordinates() {
     let (rx, ry) = right_monitor.map_normalized_to_virtual(65535, 65535, virtual_desktop);
     assert_eq!(rx, 65535);
     assert_eq!(ry, 65535);
+}
+
+#[test]
+fn toggle_fullscreen_hotkey_emits_event_without_leaking_key() {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let shared = Arc::new(AtomicBool::new(true));
+    let mut processor = HookProcessor::new(
+        HookOptions {
+            start_active: true,
+            ignore_injected_keys: true,
+            toggle_hotkey: HotkeyBinding::new(true, true, false, false, b'K' as u16),
+            release_all_hotkey: HotkeyBinding::new(true, true, false, false, 0x1B),
+            toggle_display_hotkey: Some(HotkeyBinding::new(true, true, false, false, b'D' as u16)),
+            toggle_fullscreen_hotkey: Some(HotkeyBinding::new(
+                true,
+                true,
+                false,
+                false,
+                b'F' as u16,
+            )),
+        },
+        shared,
+        tx,
+    );
+
+    let mut noop = |_: &[PressedKey]| {};
+    assert!(processor.handle_key_raw(VK_LCONTROL, 0x1D, false, false, false, false, 0, &mut noop));
+    assert!(processor.handle_key_raw(VK_LMENU, 0x38, false, false, true, false, 0, &mut noop));
+    assert!(processor.handle_key_raw(b'F' as u16, 0x21, false, false, true, false, 0, &mut noop));
+    assert!(processor.handle_key_raw(b'F' as u16, 0x21, true, false, true, false, 0, &mut noop));
+
+    let events: Vec<HookEvent> = rx.try_iter().collect();
+    assert!(events.contains(&HookEvent::ToggleFullscreenRequested));
+    assert!(!events.iter().any(|ev| {
+        matches!(ev, HookEvent::Key(k) if k.vk == b'F' as u16)
+    }));
 }

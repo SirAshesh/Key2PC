@@ -102,6 +102,7 @@ pub enum HookEvent {
     ActiveChanged(bool),
     ReleaseAllRequested,
     ToggleDisplayRequested,
+    ToggleFullscreenRequested,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +112,7 @@ pub struct HookOptions {
     pub toggle_hotkey: HotkeyBinding,
     pub release_all_hotkey: HotkeyBinding,
     pub toggle_display_hotkey: Option<HotkeyBinding>,
+    pub toggle_fullscreen_hotkey: Option<HotkeyBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]

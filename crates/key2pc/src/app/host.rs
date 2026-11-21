@@ -74,6 +74,26 @@ impl AppHost {
         }
     }
 
+    pub fn toggle_fullscreen(&self) {
+        if let Some(svc) = &self.service {
+            svc.toggle_fullscreen();
+        }
+    }
+
+    pub fn toggle_virtual_monitor(&self) {
+        if let Some(svc) = &self.service {
+            svc.toggle_virtual_monitor();
+        }
+    }
+
+    pub fn install_virtual_driver(&self) {
+        if let Some(svc) = &self.service {
+            if let Err(err) = svc.install_virtual_driver() {
+                write_error_log(self.log_file.as_deref(), &err.to_string());
+            }
+        }
+    }
+
     pub fn release_all(&self) {
         if let Some(svc) = &self.service {
             svc.release_all();

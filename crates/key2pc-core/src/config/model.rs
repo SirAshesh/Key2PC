@@ -91,6 +91,7 @@ pub struct SenderConfig {
     pub toggle_hotkey: HotkeyConfig,
     pub release_all_hotkey: HotkeyConfig,
     pub toggle_display_hotkey: HotkeyConfig,
+    pub toggle_fullscreen_hotkey: HotkeyConfig,
 }
 
 impl Default for SenderConfig {
@@ -119,6 +120,13 @@ impl Default for SenderConfig {
                 win: false,
                 key: "D".to_string(),
             },
+            toggle_fullscreen_hotkey: HotkeyConfig {
+                ctrl: true,
+                alt: true,
+                shift: false,
+                win: false,
+                key: "F".to_string(),
+            },
         }
     }
 }
@@ -134,6 +142,7 @@ pub struct ReceiverConfig {
 #[serde(default)]
 pub struct DisplayConfig {
     pub enabled: bool,
+    pub virtual_monitor: bool,
     pub video_port: u16,
     pub monitor: String,
     pub width: u32,
@@ -150,6 +159,7 @@ impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            virtual_monitor: true,
             video_port: 24802,
             monitor: "auto".to_string(),
             width: 1920,
@@ -286,6 +296,7 @@ impl AppConfig {
         self.sender.toggle_hotkey.to_binding()?;
         self.sender.release_all_hotkey.to_binding()?;
         self.sender.toggle_display_hotkey.to_binding()?;
+        self.sender.toggle_fullscreen_hotkey.to_binding()?;
         Ok(())
     }
 }

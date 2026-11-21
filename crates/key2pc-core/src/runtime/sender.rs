@@ -47,8 +47,10 @@ impl SenderRuntime {
         let toggle_hotkey = config.sender.toggle_hotkey.to_binding()?;
         let release_hotkey = config.sender.release_all_hotkey.to_binding()?;
         let display_hotkey = config.sender.toggle_display_hotkey.to_binding()?;
+        let fullscreen_hotkey = config.sender.toggle_fullscreen_hotkey.to_binding()?;
         let hotkey_label = toggle_hotkey.display_label();
         let display_hotkey_label = display_hotkey.display_label();
+        let display_fullscreen_hotkey_label = fullscreen_hotkey.display_label();
 
         let bind_ip: IpAddr = config.network.bind_ip.parse().map_err(|_| {
             Key2PcError::InvalidConfig(format!("Invalid bind_ip: {}", config.network.bind_ip))
@@ -75,6 +77,11 @@ impl SenderRuntime {
             } else {
                 None
             },
+            toggle_fullscreen_hotkey: if config.display.enabled {
+                Some(fullscreen_hotkey)
+            } else {
+                None
+            },
         };
         let (hook, hook_rx) = WinKeyboardHook::start(hook_options)?;
         let hook = Arc::new(hook);
@@ -92,7 +99,14 @@ impl SenderRuntime {
             hotkey_label,
             display_enabled: config.display.enabled,
             display_visible: config.display.enabled && config.display.open_viewer_on_start,
+            display_fullscreen: config.display.enabled
+                && config.display.open_viewer_on_start
+                && config.display.fullscreen,
             display_hotkey_label,
+            display_fullscreen_hotkey_label,
+            virtual_driver_installed: false,
+            virtual_monitor_active: false,
+            capture_monitor_label: String::new(),
             error_message: None,
         };
         observer(&initial_status);
@@ -114,6 +128,16 @@ impl SenderRuntime {
                 };
                 vis_observer(&snap);
             });
+            let fs_status = Arc::clone(&status);
+            let fs_observer = Arc::clone(&observer);
+            let on_fs: Arc<dyn Fn(bool) + Send + Sync> = Arc::new(move |fullscreen| {
+                let snap = {
+                    let mut st = fs_status.lock().unwrap();
+                    st.display_fullscreen = fullscreen;
+                    st.clone()
+                };
+                fs_observer(&snap);
+            });
 
             let host = VideoViewerHost::start(
                 config,
@@ -121,6 +145,7 @@ impl SenderRuntime {
                 hook.event_sender(),
                 on_focus,
                 on_vis,
+                on_fs,
             )?;
             Some(Arc::new(Mutex::new(host)))
         } else {
@@ -205,6 +230,20 @@ impl ManagedService for SenderRuntime {
                 guard.toggle_visible();
             }
         }
+    }
+
+    fn toggle_fullscreen(&self) {
+        if let Some(host) = &self.video_host {
+            if let Ok(guard) = host.lock() {
+                guard.toggle_fullscreen();
+            }
+        }
+    }
+
+    fn toggle_virtual_monitor(&self) {}
+
+    fn install_virtual_driver(&self) -> Result<()> {
+        Ok(())
     }
 
     fn release_all(&self) {
@@ -650,6 +689,13 @@ fn process_hook_event(
             if let Some(host) = video_host {
                 if let Ok(guard) = host.lock() {
                     guard.toggle_visible();
+                }
+            }
+        }
+        HookEvent::ToggleFullscreenRequested => {
+            if let Some(host) = video_host {
+                if let Ok(guard) = host.lock() {
+                    guard.toggle_fullscreen();
                 }
             }
         }

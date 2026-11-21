@@ -1,10 +1,12 @@
 use std::time::{Duration, Instant};
 
 use key2pc_core::display::{
-    enumerate_monitors, select_monitor_index, CaptureResult, DecodedFrame, DisplayViewer,
-    DxgiScreenCapturer, MfH264Decoder, MfH264Encoder, ScreenCapturer, VideoDecoder, VideoEncoder,
-    ViewerOptions,
+    enumerate_monitors, inspect_virtual_driver_status, is_virtual_display_signature,
+    select_best_display_mode_index, select_best_monitor, select_monitor_index, CaptureResult,
+    DecodedFrame, DisplayViewer, DxgiScreenCapturer, MfH264Decoder, MfH264Encoder, MonitorInfo,
+    ScreenCapturer, VideoDecoder, VideoEncoder, ViewerCommand, ViewerEvent, ViewerOptions,
 };
+use key2pc_core::input::DesktopBounds;
 use key2pc_core::protocol::{chunk_video_frame, decode_video_packet, derive_auth_key, FrameAssembler};
 
 #[test]
@@ -14,6 +16,61 @@ fn selects_secondary_monitor_automatically_when_available() {
     assert_eq!(select_monitor_index("auto", 2), 1);
     assert_eq!(select_monitor_index("0", 2), 0);
     assert_eq!(select_monitor_index("5", 2), 1);
+}
+
+#[test]
+fn select_best_monitor_prefers_virtual_and_non_primary() {
+    let monitors = vec![
+        MonitorInfo {
+            index: 0,
+            name: "\\\\.\\DISPLAY1".to_string(),
+            bounds: DesktopBounds::new(0, 0, 1920, 1080),
+            is_primary: true,
+            is_virtual: false,
+        },
+        MonitorInfo {
+            index: 1,
+            name: "\\\\.\\DISPLAY2".to_string(),
+            bounds: DesktopBounds::new(1920, 0, 2560, 1440),
+            is_primary: false,
+            is_virtual: false,
+        },
+        MonitorInfo {
+            index: 2,
+            name: "\\\\.\\DISPLAY3".to_string(),
+            bounds: DesktopBounds::new(4480, 0, 1920, 1080),
+            is_primary: false,
+            is_virtual: true,
+        },
+    ];
+    assert_eq!(select_best_monitor("auto", &monitors), 2);
+    assert_eq!(select_best_monitor("0", &monitors), 0);
+    assert_eq!(select_best_monitor("1", &monitors), 1);
+}
+
+#[test]
+fn detects_virtual_display_signatures_and_picks_best_mode() {
+    assert!(is_virtual_display_signature(
+        "\\\\.\\DISPLAY2",
+        "Parsec Virtual Display Adapter",
+        "MONITOR\\PSCCDD0"
+    ));
+    assert!(is_virtual_display_signature(
+        "\\\\.\\DISPLAY3",
+        "VDD by MTT",
+        "ROOT\\MttVDD"
+    ));
+    assert!(!is_virtual_display_signature(
+        "\\\\.\\DISPLAY1",
+        "AMD Radeon 780M Graphics",
+        "DISPLAY\\LEN1234"
+    ));
+
+    let modes = vec![(1280, 720, 60), (1920, 1080, 30), (1920, 1080, 60), (2560, 1440, 60)];
+    assert_eq!(select_best_display_mode_index(&modes, 1920, 1080, 60), Some(2));
+    assert_eq!(select_best_display_mode_index(&modes, 1920, 1080, 120), Some(2));
+    assert_eq!(select_best_display_mode_index(&[], 1920, 1080, 60), None);
+    let _ = inspect_virtual_driver_status();
 }
 
 #[test]
@@ -81,7 +138,7 @@ fn encodes_chunks_reassembles_and_decodes_1080p_h264_frames() {
 
 #[test]
 fn viewer_initializes_renders_and_shuts_down_cleanly() {
-    let (viewer, _rx) = DisplayViewer::start(ViewerOptions {
+    let (viewer, rx) = DisplayViewer::start(ViewerOptions {
         initial_width: 1280,
         initial_height: 720,
         start_visible: false,
@@ -95,6 +152,19 @@ fn viewer_initializes_renders_and_shuts_down_cleanly() {
         width: 1280,
         height: 720,
     });
+    viewer.send_command(ViewerCommand::SetFullscreen(true));
+    let mut saw_fullscreen = false;
+    for _ in 0..20 {
+        if let Ok(ViewerEvent::FullscreenChanged(true)) = rx.recv_timeout(Duration::from_millis(50))
+        {
+            saw_fullscreen = true;
+            break;
+        }
+    }
+    assert!(saw_fullscreen);
+    assert!(viewer.is_fullscreen());
+    viewer.send_command(ViewerCommand::SetFullscreen(false));
+    std::thread::sleep(Duration::from_millis(50));
     viewer.shutdown();
 }
 

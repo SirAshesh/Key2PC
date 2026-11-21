@@ -41,7 +41,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_F11};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_F11, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongW, GetWindowRect, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassW,
@@ -66,6 +66,7 @@ pub enum ViewerCommand {
     Hide,
     ToggleVisible,
     ToggleFullscreen,
+    SetFullscreen(bool),
     Shutdown,
 }
 
@@ -74,6 +75,7 @@ pub enum ViewerEvent {
     Mouse(MouseEvent),
     VisibilityChanged(bool),
     FocusChanged(bool),
+    FullscreenChanged(bool),
 }
 
 pub struct ViewerOptions {
@@ -87,6 +89,7 @@ pub struct ViewerOptions {
 pub struct DisplayViewer {
     hwnd_raw: isize,
     visible: Arc<AtomicBool>,
+    fullscreen: Arc<AtomicBool>,
     latest_frame: Arc<Mutex<Option<DecodedFrame>>>,
     status_text: Arc<Mutex<String>>,
     command_tx: Sender<ViewerCommand>,
@@ -101,12 +104,14 @@ impl DisplayViewer {
         let latest_frame = Arc::new(Mutex::new(None));
         let frame_slot = Arc::clone(&latest_frame);
         let status_text = Arc::new(Mutex::new(
-            "Waiting for PC connection on local network...\nEnsure Key2PC is running on PC with role: receiver"
+            "Waiting for PC connection on local network...\nPress F11, Alt+Enter, or Ctrl+Alt+F for Fullscreen"
                 .to_string(),
         ));
         let status_slot = Arc::clone(&status_text);
         let visible = Arc::new(AtomicBool::new(options.start_visible));
         let visible_flag = Arc::clone(&visible);
+        let fullscreen = Arc::new(AtomicBool::new(options.start_fullscreen));
+        let fullscreen_flag = Arc::clone(&fullscreen);
 
         let handle = thread::Builder::new()
             .name("key2pc-viewer".to_string())
@@ -115,12 +120,15 @@ impl DisplayViewer {
                     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
                 };
                 if let Err(err) = run_viewer_loop(
-                    options,
-                    frame_slot,
-                    status_slot,
-                    visible_flag,
-                    command_rx,
-                    event_tx,
+                    ViewerLoopInit {
+                        options,
+                        latest_frame: frame_slot,
+                        status_text: status_slot,
+                        visible: visible_flag,
+                        fullscreen_flag,
+                        command_rx,
+                        event_tx,
+                    },
                     &ready_tx,
                 ) {
                     let _ = ready_tx.send(Err(err));
@@ -136,6 +144,7 @@ impl DisplayViewer {
             Self {
                 hwnd_raw,
                 visible,
+                fullscreen,
                 latest_frame,
                 status_text,
                 command_tx,
@@ -143,6 +152,10 @@ impl DisplayViewer {
             },
             event_rx,
         ))
+    }
+
+    pub fn is_fullscreen(&self) -> bool {
+        self.fullscreen.load(Ordering::Acquire)
     }
 
     pub fn set_status_text(&self, text: impl Into<String>) {
@@ -823,6 +836,7 @@ struct ViewerWindowState {
     status_text: Arc<Mutex<String>>,
     has_frame: bool,
     visible: Arc<AtomicBool>,
+    fullscreen_flag: Arc<AtomicBool>,
     command_rx: Receiver<ViewerCommand>,
     event_tx: Sender<ViewerEvent>,
     capture_mouse: bool,
@@ -835,9 +849,15 @@ struct ViewerWindowState {
 }
 
 impl ViewerWindowState {
-    fn toggle_fullscreen(&mut self, hwnd: HWND) {
+    fn set_fullscreen(&mut self, hwnd: HWND, enable: bool) {
+        if enable && !self.visible.load(Ordering::Acquire) {
+            self.set_visible(hwnd, true);
+        }
+        if self.fullscreen == enable {
+            return;
+        }
         let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) };
-        if !self.fullscreen {
+        if enable {
             self.saved_style = style;
             let _ = unsafe { GetWindowRect(hwnd, &mut self.saved_windowed_rect) };
             let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
@@ -879,6 +899,15 @@ impl ViewerWindowState {
             }
             self.fullscreen = false;
         }
+        self.fullscreen_flag.store(self.fullscreen, Ordering::Release);
+        let _ = self
+            .event_tx
+            .try_send(ViewerEvent::FullscreenChanged(self.fullscreen));
+    }
+
+    fn toggle_fullscreen(&mut self, hwnd: HWND) {
+        let next = !self.fullscreen;
+        self.set_fullscreen(hwnd, next);
     }
 
     fn set_visible(&mut self, hwnd: HWND, show: bool) {
@@ -931,15 +960,26 @@ impl ViewerWindowState {
     }
 }
 
-fn run_viewer_loop(
+struct ViewerLoopInit {
     options: ViewerOptions,
     latest_frame: Arc<Mutex<Option<DecodedFrame>>>,
     status_text: Arc<Mutex<String>>,
     visible: Arc<AtomicBool>,
+    fullscreen_flag: Arc<AtomicBool>,
     command_rx: Receiver<ViewerCommand>,
     event_tx: Sender<ViewerEvent>,
-    ready_tx: &Sender<Result<isize>>,
-) -> Result<()> {
+}
+
+fn run_viewer_loop(init: ViewerLoopInit, ready_tx: &Sender<Result<isize>>) -> Result<()> {
+    let ViewerLoopInit {
+        options,
+        latest_frame,
+        status_text,
+        visible,
+        fullscreen_flag,
+        command_rx,
+        event_tx,
+    } = init;
     let class_name = w!("Key2PCSecondScreenClass");
     let hinstance = unsafe { GetModuleHandleW(None) }
         .map_err(|err| Key2PcError::Display(format!("GetModuleHandleW failed: {err}")))?;
@@ -965,7 +1005,7 @@ fn run_viewer_loop(
         CreateWindowExW(
             Default::default(),
             class_name,
-            w!("Key2PC Second Screen | F11 Fullscreen"),
+            w!("Key2PC Second Screen | F11 or Alt+Enter Fullscreen"),
             style,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -991,6 +1031,7 @@ fn run_viewer_loop(
         status_text,
         has_frame: false,
         visible,
+        fullscreen_flag,
         command_rx,
         event_tx,
         capture_mouse: options.capture_mouse,
@@ -1008,7 +1049,7 @@ fn run_viewer_loop(
     });
 
     if options.start_fullscreen {
-        state.toggle_fullscreen(hwnd);
+        state.set_fullscreen(hwnd, true);
     }
 
     let state_ptr = Box::into_raw(state);
@@ -1105,6 +1146,7 @@ unsafe extern "system" fn viewer_wnd_proc(
                         state.set_visible(hwnd, next);
                     }
                     ViewerCommand::ToggleFullscreen => state.toggle_fullscreen(hwnd),
+                    ViewerCommand::SetFullscreen(enable) => state.set_fullscreen(hwnd, enable),
                     ViewerCommand::Shutdown => unsafe {
                         let _ = DestroyWindow(hwnd);
                     },
@@ -1119,7 +1161,10 @@ unsafe extern "system" fn viewer_wnd_proc(
             LRESULT(0)
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
-            if wparam.0 == usize::from(VK_F11.0) {
+            let is_alt = (lparam.0 & (1 << 29)) != 0;
+            let is_f11 = wparam.0 == usize::from(VK_F11.0);
+            let is_alt_enter = wparam.0 == usize::from(VK_RETURN.0) && is_alt;
+            if is_f11 || is_alt_enter {
                 state.toggle_fullscreen(hwnd);
                 return LRESULT(0);
             }

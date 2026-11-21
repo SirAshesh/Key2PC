@@ -4,6 +4,7 @@ mod capture;
 mod codec;
 #[cfg(target_os = "windows")]
 mod viewer;
+mod virtual_display;
 
 use crate::error::Result;
 use crate::input::DesktopBounds;
@@ -14,6 +15,7 @@ pub struct MonitorInfo {
     pub name: String,
     pub bounds: DesktopBounds,
     pub is_primary: bool,
+    pub is_virtual: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +73,47 @@ pub fn select_monitor_index(setting: &str, count: usize) -> usize {
     }
 }
 
+pub fn select_best_monitor(setting: &str, monitors: &[MonitorInfo]) -> usize {
+    if monitors.is_empty() {
+        return 0;
+    }
+    let trimmed = setting.trim();
+    if trimmed.eq_ignore_ascii_case("auto") {
+        if let Some(idx) = monitors.iter().position(|m| !m.is_primary && m.is_virtual) {
+            return idx;
+        }
+        if let Some(idx) = monitors.iter().position(|m| m.is_virtual) {
+            return idx;
+        }
+        if let Some(idx) = monitors.iter().position(|m| !m.is_primary) {
+            return idx;
+        }
+        0
+    } else if let Ok(idx) = trimmed.parse::<usize>() {
+        idx.min(monitors.len() - 1)
+    } else {
+        0
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) const EDD_GET_DEVICE_INTERFACE_NAME: u32 = 0x1;
+
+#[cfg(target_os = "windows")]
+pub(crate) fn utf16_z_to_string(slice: &[u16]) -> String {
+    let len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+    String::from_utf16_lossy(&slice[..len])
+}
+
+pub use virtual_display::{
+    is_virtual_display_signature, select_best_display_mode_index, VirtualDriverBackend,
+    VirtualDriverStatus,
+};
+#[cfg(target_os = "windows")]
+pub use virtual_display::{
+    inspect_virtual_driver_status, request_elevated_vdd_install, run_vdd_installer_cli,
+    VirtualMonitorGuard,
+};
 #[cfg(target_os = "windows")]
 pub use capture::{enumerate_monitors, DxgiScreenCapturer};
 #[cfg(target_os = "windows")]

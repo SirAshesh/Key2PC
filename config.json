@@ -38,6 +38,13 @@
       "shift": false,
       "win": false,
       "key": "D"
+    },
+    "toggle_fullscreen_hotkey": {
+      "ctrl": true,
+      "alt": true,
+      "shift": false,
+      "win": false,
+      "key": "F"
     }
   },
   "receiver": {
@@ -46,6 +53,7 @@
   },
   "display": {
     "enabled": true,
+    "virtual_monitor": true,
     "video_port": 24802,
     "monitor": "auto",
     "width": 1920,

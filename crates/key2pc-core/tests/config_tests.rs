@@ -55,6 +55,8 @@ fn json_file_store_creates_saves_and_reloads_config() {
     assert_eq!(reloaded.role, Role::Receiver);
     assert_eq!(reloaded.network.port, 24900);
     assert_eq!(reloaded.display.fps, 60);
+    assert!(reloaded.display.virtual_monitor);
+    assert_eq!(reloaded.sender.toggle_fullscreen_hotkey.key, "F");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

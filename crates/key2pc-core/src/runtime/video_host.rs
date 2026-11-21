@@ -1,5 +1,5 @@
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -35,6 +35,7 @@ pub struct VideoStreamerHost {
 impl VideoStreamerHost {
     pub fn start(
         config: &AppConfig,
+        capture_epoch: Arc<AtomicU64>,
         bounds_callback: Arc<dyn Fn(DesktopBounds) + Send + Sync>,
     ) -> Result<Self> {
         let bind_ip: IpAddr = config
@@ -94,11 +95,9 @@ impl VideoStreamerHost {
                                 VideoPacketKind::KeyframeReq => {
                                     guard.force_keyframe = true;
                                 }
-                                VideoPacketKind::StreamStop => {
-                                    if guard.viewer_addr == Some(src) {
-                                        guard.viewer_addr = None;
-                                        guard.last_hello_at = None;
-                                    }
+                                VideoPacketKind::StreamStop if guard.viewer_addr == Some(src) => {
+                                    guard.viewer_addr = None;
+                                    guard.last_hello_at = None;
                                 }
                                 _ => {}
                             }
@@ -111,6 +110,7 @@ impl VideoStreamerHost {
 
         let tx_running = Arc::clone(&running);
         let tx_cfg = config.display.clone();
+        let tx_epoch = Arc::clone(&capture_epoch);
         let tx_handle = thread::Builder::new()
             .name("key2pc-video-srv-tx".to_string())
             .spawn(move || {
@@ -121,6 +121,7 @@ impl VideoStreamerHost {
                     peer_state,
                     auth_key,
                     tx_cfg,
+                    tx_epoch,
                     bounds_callback,
                 );
             })?;
@@ -155,10 +156,12 @@ fn run_video_streamer_loop(
     peer_state: Arc<Mutex<StreamPeerState>>,
     auth_key: [u8; 32],
     cfg: crate::config::DisplayConfig,
+    capture_epoch: Arc<AtomicU64>,
     bounds_callback: Arc<dyn Fn(DesktopBounds) + Send + Sync>,
 ) {
     let mut capturer: Option<DxgiScreenCapturer> = None;
     let mut encoder: Option<MfH264Encoder> = None;
+    let mut observed_epoch = capture_epoch.load(Ordering::Acquire);
     let mut nv12_buf = Vec::with_capacity((cfg.width * cfg.height * 3 / 2) as usize);
     let mut frame_id = 1u32;
     let epoch = Instant::now();
@@ -167,6 +170,17 @@ fn run_video_streamer_loop(
     let mut logged_error = false;
 
     while running.load(Ordering::Acquire) {
+        let current_epoch = capture_epoch.load(Ordering::Acquire);
+        if current_epoch != observed_epoch {
+            observed_epoch = current_epoch;
+            capturer = None;
+            encoder = None;
+            nv12_buf.clear();
+            if let Ok(mut guard) = peer_state.lock() {
+                guard.force_keyframe = true;
+            }
+        }
+
         let (viewer_opt, force_idr) = {
             let mut guard = peer_state.lock().unwrap();
             if let Some(last_hello) = guard.last_hello_at {
@@ -301,6 +315,7 @@ impl VideoViewerHost {
         hook_tx: Sender<HookEvent>,
         on_focus_active: Arc<dyn Fn(bool) + Send + Sync>,
         on_visibility_changed: Arc<dyn Fn(bool) + Send + Sync>,
+        on_fullscreen_changed: Arc<dyn Fn(bool) + Send + Sync>,
     ) -> Result<Self> {
         let bind_ip: IpAddr = config
             .network
@@ -368,6 +383,7 @@ impl VideoViewerHost {
                     auto_focus,
                     on_focus_active,
                     on_visibility_changed,
+                    on_fullscreen_changed,
                 );
             })?;
 
@@ -388,6 +404,10 @@ impl VideoViewerHost {
 
     pub fn toggle_visible(&self) {
         self.viewer.send_command(ViewerCommand::ToggleVisible);
+    }
+
+    pub fn toggle_fullscreen(&self) {
+        self.viewer.send_command(ViewerCommand::ToggleFullscreen);
     }
 
     pub fn shutdown(&mut self) {
@@ -555,6 +575,7 @@ fn run_viewer_event_bridge(
     auto_focus: bool,
     on_focus_active: Arc<dyn Fn(bool) + Send + Sync>,
     on_visibility_changed: Arc<dyn Fn(bool) + Send + Sync>,
+    on_fullscreen_changed: Arc<dyn Fn(bool) + Send + Sync>,
 ) {
     let mut control_buf = Vec::with_capacity(64);
     while running.load(Ordering::Acquire) {
@@ -566,6 +587,9 @@ fn run_viewer_event_bridge(
                 if auto_focus {
                     on_focus_active(focused);
                 }
+            }
+            Ok(ViewerEvent::FullscreenChanged(fullscreen)) => {
+                on_fullscreen_changed(fullscreen);
             }
             Ok(ViewerEvent::VisibilityChanged(visible)) => {
                 on_visibility_changed(visible);

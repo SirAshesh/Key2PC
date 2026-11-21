@@ -14,6 +14,7 @@ pub struct HookProcessor {
     toggle_hotkey: HotkeyBinding,
     release_all_hotkey: HotkeyBinding,
     toggle_display_hotkey: Option<HotkeyBinding>,
+    toggle_fullscreen_hotkey: Option<HotkeyBinding>,
     modifiers: ModifierState,
     local_held: PressedKeySet,
     remote_held: PressedKeySet,
@@ -35,6 +36,7 @@ impl HookProcessor {
             toggle_hotkey: options.toggle_hotkey,
             release_all_hotkey: options.release_all_hotkey,
             toggle_display_hotkey: options.toggle_display_hotkey,
+            toggle_fullscreen_hotkey: options.toggle_fullscreen_hotkey,
             modifiers: ModifierState::default(),
             local_held: PressedKeySet::default(),
             remote_held: PressedKeySet::default(),
@@ -80,6 +82,14 @@ impl HookProcessor {
             if self.modifiers.matches(display_hotkey, vk, is_up) {
                 self.mark_suppressed_until_up(vk);
                 let _ = self.event_tx.try_send(HookEvent::ToggleDisplayRequested);
+                return true;
+            }
+        }
+
+        if let Some(fullscreen_hotkey) = &self.toggle_fullscreen_hotkey {
+            if self.modifiers.matches(fullscreen_hotkey, vk, is_up) {
+                self.mark_suppressed_until_up(vk);
+                let _ = self.event_tx.try_send(HookEvent::ToggleFullscreenRequested);
                 return true;
             }
         }

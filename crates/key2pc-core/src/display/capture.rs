@@ -2,7 +2,7 @@ use std::mem::ManuallyDrop;
 use std::ptr;
 use std::slice;
 
-use windows::core::Interface;
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
@@ -27,15 +27,18 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS,
-    HBITMAP, HDC, HGDIOBJ, SRCCOPY,
+    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayDevicesW,
+    GdiFlush, GetDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT,
+    DIB_RGB_COLORS, DISPLAY_DEVICEW, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
 };
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 
-use crate::display::{select_monitor_index, CaptureResult, MonitorInfo, ScreenCapturer};
+use crate::display::{
+    is_virtual_display_signature, select_best_monitor, utf16_z_to_string, CaptureResult,
+    MonitorInfo, ScreenCapturer, EDD_GET_DEVICE_INTERFACE_NAME,
+};
 use crate::error::{Key2PcError, Result};
 use crate::input::DesktopBounds;
 
@@ -61,6 +64,9 @@ fn collect_outputs() -> Result<Vec<SelectedOutput>> {
 
     while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_idx) } {
         adapter_idx += 1;
+        let adapter_name = unsafe { adapter.GetDesc1() }
+            .map(|d| utf16_z_to_string(&d.Description))
+            .unwrap_or_default();
         let mut output_idx = 0u32;
         while let Ok(output) = unsafe { adapter.EnumOutputs(output_idx) } {
             output_idx += 1;
@@ -77,12 +83,8 @@ fn collect_outputs() -> Result<Vec<SelectedOutput>> {
                 rect.right - rect.left,
                 rect.bottom - rect.top,
             );
-            let name_len = desc
-                .DeviceName
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(desc.DeviceName.len());
-            let name = String::from_utf16_lossy(&desc.DeviceName[..name_len]);
+            let name = utf16_z_to_string(&desc.DeviceName);
+            let is_virtual = check_output_is_virtual(&name, &adapter_name);
             let is_primary = rect.left == 0 && rect.top == 0;
             let index = result.len();
             result.push(SelectedOutput {
@@ -93,12 +95,42 @@ fn collect_outputs() -> Result<Vec<SelectedOutput>> {
                     name,
                     bounds,
                     is_primary,
+                    is_virtual,
                 },
             });
         }
     }
 
     Ok(result)
+}
+
+fn check_output_is_virtual(device_name: &str, adapter_name: &str) -> bool {
+    let wide: Vec<u16> = device_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut mon = DISPLAY_DEVICEW {
+        cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+        ..Default::default()
+    };
+    let (mon_str, mon_id) = if unsafe {
+        EnumDisplayDevicesW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            &mut mon,
+            EDD_GET_DEVICE_INTERFACE_NAME,
+        )
+    }
+    .as_bool()
+    {
+        (
+            utf16_z_to_string(&mon.DeviceString),
+            utf16_z_to_string(&mon.DeviceID),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+    is_virtual_display_signature(device_name, &format!("{adapter_name} {mon_str}"), &mon_id)
 }
 
 struct GpuColorConverter {
@@ -261,7 +293,8 @@ impl DxgiScreenCapturer {
             ));
         }
 
-        let idx = select_monitor_index(monitor_setting, outputs.len());
+        let infos: Vec<MonitorInfo> = outputs.iter().map(|o| o.info.clone()).collect();
+        let idx = select_best_monitor(monitor_setting, &infos);
         let selected = outputs.into_iter().nth(idx).unwrap();
         let bounds = selected.info.bounds;
         let src_w = bounds.width as u32;

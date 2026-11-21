@@ -66,6 +66,9 @@ pub fn run() -> i32 {
             match action {
                 TrayAction::ToggleForwarding => host.toggle_active(),
                 TrayAction::ToggleDisplay => host.toggle_display(),
+                TrayAction::ToggleFullscreen => host.toggle_fullscreen(),
+                TrayAction::ToggleVirtualMonitor => host.toggle_virtual_monitor(),
+                TrayAction::InstallVirtualDriver => host.install_virtual_driver(),
                 TrayAction::ReleaseAll => host.release_all(),
                 TrayAction::ReloadConfig => host.start_or_reload(),
                 TrayAction::Exit => unsafe {

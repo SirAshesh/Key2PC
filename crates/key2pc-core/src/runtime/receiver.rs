@@ -1,11 +1,14 @@
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::config::{AppConfig, Role};
-use crate::display::{enumerate_monitors, select_monitor_index};
+use crate::config::{AppConfig, DisplayConfig, Role};
+use crate::display::{
+    enumerate_monitors, inspect_virtual_driver_status, request_elevated_vdd_install,
+    select_best_monitor, VirtualMonitorGuard,
+};
 use crate::error::{Key2PcError, Result};
 use crate::input::{boost_current_thread_priority, DesktopBounds, InputSink, WinInputInjector};
 use crate::network::{create_tuned_udp_socket, UdpSocketConfig};
@@ -16,7 +19,12 @@ use crate::runtime::video_host::VideoStreamerHost;
 
 pub struct ReceiverRuntime {
     running: Arc<AtomicBool>,
+    display_cfg: DisplayConfig,
+    capture_epoch: Arc<AtomicU64>,
+    shared_bounds: Arc<Mutex<Option<DesktopBounds>>>,
+    virtual_guard: Arc<Mutex<Option<VirtualMonitorGuard>>>,
     status: Arc<Mutex<ServiceStatus>>,
+    observer: StatusObserver,
     rx_handle: Option<JoinHandle<()>>,
     discovery_handle: Option<JoinHandle<()>>,
     video_host: Option<VideoStreamerHost>,
@@ -24,19 +32,13 @@ pub struct ReceiverRuntime {
 
 impl ReceiverRuntime {
     pub fn start(config: &AppConfig, observer: StatusObserver) -> Result<Self> {
-        let mut sink = Box::new(WinInputInjector::new(config.receiver.prefer_scancode));
-        if let Ok(monitors) = enumerate_monitors() {
-            if !monitors.is_empty() {
-                let idx = select_monitor_index(&config.display.monitor, monitors.len());
-                sink.set_monitor_bounds(monitors[idx].bounds);
-            }
-        }
+        let sink = Box::new(WinInputInjector::new(config.receiver.prefer_scancode));
         Self::start_with_sink(config, sink, observer)
     }
 
     pub fn start_with_sink(
         config: &AppConfig,
-        sink: Box<dyn InputSink>,
+        mut sink: Box<dyn InputSink>,
         observer: StatusObserver,
     ) -> Result<Self> {
         config.validate()?;
@@ -50,6 +52,24 @@ impl ReceiverRuntime {
             .map(str::parse)
             .transpose()
             .map_err(|_| Key2PcError::InvalidConfig("Invalid allow_only_ip".to_string()))?;
+
+        let drv_status = inspect_virtual_driver_status();
+        let mut initial_vdd_guard = None;
+        if config.display.enabled && config.display.virtual_monitor && drv_status.is_ready() {
+            if let Ok(guard) = VirtualMonitorGuard::acquire(
+                config.display.width,
+                config.display.height,
+                config.display.fps,
+            ) {
+                initial_vdd_guard = Some(guard);
+            }
+        }
+
+        let (initial_bounds, monitor_label, has_virtual_active) =
+            resolve_capture_monitor_info(&config.display, initial_vdd_guard.is_some());
+        if let Some(bounds) = initial_bounds {
+            sink.set_monitor_bounds(bounds);
+        }
 
         let main_socket = create_tuned_udp_socket(&UdpSocketConfig {
             bind_addr: SocketAddr::new(bind_ip, config.network.port),
@@ -81,7 +101,12 @@ impl ReceiverRuntime {
             hotkey_label: String::new(),
             display_enabled: config.display.enabled,
             display_visible: false,
+            display_fullscreen: false,
             display_hotkey_label: String::new(),
+            display_fullscreen_hotkey_label: String::new(),
+            virtual_driver_installed: drv_status.is_ready(),
+            virtual_monitor_active: has_virtual_active,
+            capture_monitor_label: monitor_label,
             error_message: None,
         };
         observer(&initial_status);
@@ -94,7 +119,9 @@ impl ReceiverRuntime {
         let disconnect_release = Duration::from_millis(config.network.disconnect_release_ms);
         let peer_idle_drop = disconnect_release.saturating_mul(3);
 
-        let shared_bounds = Arc::new(Mutex::new(None::<DesktopBounds>));
+        let capture_epoch = Arc::new(AtomicU64::new(0));
+        let shared_bounds = Arc::new(Mutex::new(initial_bounds));
+        let virtual_guard = Arc::new(Mutex::new(initial_vdd_guard));
         let video_host = if config.display.enabled {
             let bounds_slot = Arc::clone(&shared_bounds);
             let bounds_cb: Arc<dyn Fn(DesktopBounds) + Send + Sync> = Arc::new(move |bounds| {
@@ -102,7 +129,11 @@ impl ReceiverRuntime {
                     *guard = Some(bounds);
                 }
             });
-            Some(VideoStreamerHost::start(config, bounds_cb)?)
+            Some(VideoStreamerHost::start(
+                config,
+                Arc::clone(&capture_epoch),
+                bounds_cb,
+            )?)
         } else {
             None
         };
@@ -293,7 +324,12 @@ impl ReceiverRuntime {
 
         Ok(Self {
             running,
+            display_cfg: config.display.clone(),
+            capture_epoch,
+            shared_bounds,
+            virtual_guard,
             status,
+            observer,
             rx_handle: Some(rx_handle),
             discovery_handle,
             video_host,
@@ -305,6 +341,79 @@ impl ManagedService for ReceiverRuntime {
     fn toggle_active(&self) {}
     fn set_active(&self, _active: bool) {}
     fn toggle_display(&self) {}
+    fn toggle_fullscreen(&self) {}
+
+    fn toggle_virtual_monitor(&self) {
+        if !self.display_cfg.enabled {
+            return;
+        }
+        let guard_slot = Arc::clone(&self.virtual_guard);
+        let bounds_slot = Arc::clone(&self.shared_bounds);
+        let capture_epoch = Arc::clone(&self.capture_epoch);
+        let status = Arc::clone(&self.status);
+        let observer = Arc::clone(&self.observer);
+        let cfg = self.display_cfg.clone();
+
+        let _ = thread::Builder::new()
+            .name("key2pc-vdd-toggle".to_string())
+            .spawn(move || {
+                toggle_virtual_monitor_sync(
+                    &cfg,
+                    &guard_slot,
+                    &bounds_slot,
+                    &capture_epoch,
+                    &status,
+                    &observer,
+                );
+            });
+    }
+
+    fn install_virtual_driver(&self) -> Result<()> {
+        request_elevated_vdd_install()?;
+        let running = Arc::clone(&self.running);
+        let guard_slot = Arc::clone(&self.virtual_guard);
+        let bounds_slot = Arc::clone(&self.shared_bounds);
+        let capture_epoch = Arc::clone(&self.capture_epoch);
+        let status = Arc::clone(&self.status);
+        let observer = Arc::clone(&self.observer);
+        let cfg = self.display_cfg.clone();
+
+        let _ = thread::Builder::new()
+            .name("key2pc-vdd-watch".to_string())
+            .spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while running.load(Ordering::Acquire) && Instant::now() < deadline {
+                    if inspect_virtual_driver_status().is_ready() {
+                        if let Ok(mut st) = status.lock() {
+                            st.virtual_driver_installed = true;
+                        }
+                        if cfg.enabled && cfg.virtual_monitor {
+                            let is_active = guard_slot
+                                .lock()
+                                .map(|g| g.is_some())
+                                .unwrap_or(false);
+                            if !is_active {
+                                toggle_virtual_monitor_sync(
+                                    &cfg,
+                                    &guard_slot,
+                                    &bounds_slot,
+                                    &capture_epoch,
+                                    &status,
+                                    &observer,
+                                );
+                                return;
+                            }
+                        }
+                        let snap = status.lock().unwrap().clone();
+                        observer(&snap);
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(500));
+                }
+            });
+        Ok(())
+    }
+
     fn release_all(&self) {}
 
     fn status(&self) -> ServiceStatus {
@@ -315,6 +424,11 @@ impl ManagedService for ReceiverRuntime {
         self.running.store(false, Ordering::Release);
         if let Some(mut vhost) = self.video_host.take() {
             vhost.shutdown();
+        }
+        if let Ok(mut guard) = self.virtual_guard.lock() {
+            if let Some(mut vdd) = guard.take() {
+                vdd.shutdown();
+            }
         }
         if let Some(handle) = self.rx_handle.take() {
             let _ = handle.join();
@@ -329,4 +443,89 @@ impl Drop for ReceiverRuntime {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+fn resolve_capture_monitor_info(
+    cfg: &DisplayConfig,
+    virtual_guard_active: bool,
+) -> (Option<DesktopBounds>, String, bool) {
+    let Ok(monitors) = enumerate_monitors() else {
+        return (None, String::new(), virtual_guard_active);
+    };
+    if monitors.is_empty() {
+        return (None, String::new(), virtual_guard_active);
+    }
+    let idx = select_best_monitor(&cfg.monitor, &monitors);
+    let chosen = &monitors[idx];
+    let virtual_active = virtual_guard_active || chosen.is_virtual;
+    let label = if chosen.is_virtual {
+        format!(
+            "Extended Virtual ({}x{})",
+            chosen.bounds.width, chosen.bounds.height
+        )
+    } else if !chosen.is_primary {
+        format!(
+            "Extended #{} ({}x{})",
+            chosen.index + 1,
+            chosen.bounds.width,
+            chosen.bounds.height
+        )
+    } else {
+        format!("Mirror ({}x{})", chosen.bounds.width, chosen.bounds.height)
+    };
+    (Some(chosen.bounds), label, virtual_active)
+}
+
+fn toggle_virtual_monitor_sync(
+    cfg: &DisplayConfig,
+    guard_slot: &Arc<Mutex<Option<VirtualMonitorGuard>>>,
+    bounds_slot: &Arc<Mutex<Option<DesktopBounds>>>,
+    capture_epoch: &Arc<AtomicU64>,
+    status: &Arc<Mutex<ServiceStatus>>,
+    observer: &StatusObserver,
+) {
+    let mut active_now = {
+        let mut guard = guard_slot.lock().unwrap();
+        if let Some(mut vdd) = guard.take() {
+            vdd.shutdown();
+            false
+        } else {
+            true
+        }
+    };
+
+    if active_now {
+        match VirtualMonitorGuard::acquire(cfg.width, cfg.height, cfg.fps) {
+            Ok(vdd) => {
+                *guard_slot.lock().unwrap() = Some(vdd);
+            }
+            Err(err) => {
+                active_now = false;
+                if let Ok(mut st) = status.lock() {
+                    st.error_message = Some(err.to_string());
+                }
+            }
+        }
+    }
+
+    let drv_ready = inspect_virtual_driver_status().is_ready();
+    let (new_bounds, monitor_label, has_virtual) = resolve_capture_monitor_info(cfg, active_now);
+    if let Some(bounds) = new_bounds {
+        if let Ok(mut b) = bounds_slot.lock() {
+            *b = Some(bounds);
+        }
+    }
+    capture_epoch.fetch_add(1, Ordering::Release);
+
+    let snap = {
+        let mut st = status.lock().unwrap();
+        st.virtual_driver_installed = drv_ready;
+        st.virtual_monitor_active = has_virtual;
+        st.capture_monitor_label = monitor_label;
+        if active_now {
+            st.error_message = None;
+        }
+        st.clone()
+    };
+    observer(&snap);
 }
