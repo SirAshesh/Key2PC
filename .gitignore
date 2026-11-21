@@ -1,0 +1,5 @@
+/target/
+**/*.rs.bk
+*.log
+key2pc-error.log
+/dist/

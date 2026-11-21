@@ -1,0 +1,43 @@
+{
+  "role": "sender",
+  "device_name": "Laptop-Keyboard",
+  "log_file": null,
+  "network": {
+    "bind_ip": "0.0.0.0",
+    "port": 24800,
+    "target_host": "auto",
+    "discovery_port": 24801,
+    "shared_secret": "key2pc-change-this-secret",
+    "retransmit_ms": 3,
+    "max_retransmits": 6,
+    "heartbeat_ms": 100,
+    "disconnect_release_ms": 1500,
+    "redundant_sends": 1,
+    "low_delay_tos": true
+  },
+  "sender": {
+    "start_active": false,
+    "ignore_injected_keys": true,
+    "toggle_hotkey": {
+      "ctrl": true,
+      "alt": true,
+      "shift": false,
+      "win": false,
+      "key": "K"
+    },
+    "release_all_hotkey": {
+      "ctrl": true,
+      "alt": true,
+      "shift": false,
+      "win": false,
+      "key": "Escape"
+    }
+  },
+  "receiver": {
+    "allow_only_ip": null,
+    "prefer_scancode": false
+  },
+  "tray": {
+    "show_tooltip_latency": true
+  }
+}
