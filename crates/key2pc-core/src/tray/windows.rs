@@ -8,6 +8,7 @@ use crate::config::Role;
 use crate::error::{Key2PcError, Result};
 use crate::runtime::ServiceStatus;
 use crate::tray::icon::{build_status_icon, IconPalette};
+use crate::updater::APP_VERSION;
 
 const TRAY_GUID: u128 = 0x6B65_7932_7063_7472_6179_0000_0000_0001;
 
@@ -16,10 +17,11 @@ pub enum TrayAction {
     ToggleForwarding,
     ToggleDisplay,
     ToggleFullscreen,
-    ToggleFillScreen,
     ToggleVirtualMonitor,
     InstallVirtualDriver,
     ReleaseAll,
+    ToggleRunOnStartup,
+    CheckForUpdates,
     ReloadConfig,
     Exit,
 }
@@ -30,10 +32,10 @@ pub struct TrayController {
     toggle_item: CheckMenuItem,
     display_item: CheckMenuItem,
     fullscreen_item: CheckMenuItem,
-    fill_screen_item: CheckMenuItem,
     release_item: MenuItem,
     virtual_monitor_item: CheckMenuItem,
     install_vdd_item: MenuItem,
+    startup_item: CheckMenuItem,
     show_latency: bool,
     current_palette: IconPalette,
 }
@@ -68,12 +70,6 @@ impl TrayController {
             initial_status.display_visible && initial_status.display_fullscreen,
             None,
         );
-        let fill_screen_item = CheckMenuItem::new(
-            "Fill Screen Without Bars (F10)",
-            is_sender_ok && initial_status.display_enabled,
-            is_sender_ok && initial_status.display_enabled && initial_status.display_fill_screen,
-            None,
-        );
         let release_item = MenuItem::new("Release All Remote Keys", is_sender_ok, None);
         let virtual_monitor_item = CheckMenuItem::new(
             format_virtual_monitor_label(initial_status),
@@ -88,6 +84,13 @@ impl TrayController {
             is_receiver_ok && initial_status.display_enabled,
             None,
         );
+        let startup_item = CheckMenuItem::new(
+            "Start with Windows",
+            true,
+            crate::startup::is_run_on_startup_enabled(),
+            None,
+        );
+        let update_item = MenuItem::new(format!("Check for Updates (v{APP_VERSION})"), true, None);
         let reload_item = MenuItem::new("Reload config.json", true, None);
         let exit_item = MenuItem::new("Exit", true, None);
 
@@ -101,8 +104,6 @@ impl TrayController {
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
         menu.append(&fullscreen_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
-        menu.append(&fill_screen_item)
-            .map_err(|err| Key2PcError::Tray(err.to_string()))?;
         menu.append(&release_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
         menu.append(&PredefinedMenuItem::separator())
@@ -112,6 +113,10 @@ impl TrayController {
         menu.append(&install_vdd_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
         menu.append(&PredefinedMenuItem::separator())
+            .map_err(|err| Key2PcError::Tray(err.to_string()))?;
+        menu.append(&startup_item)
+            .map_err(|err| Key2PcError::Tray(err.to_string()))?;
+        menu.append(&update_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
         menu.append(&reload_item)
             .map_err(|err| Key2PcError::Tray(err.to_string()))?;
@@ -134,10 +139,11 @@ impl TrayController {
         let toggle_id: MenuId = toggle_item.id().clone();
         let display_id: MenuId = display_item.id().clone();
         let fullscreen_id: MenuId = fullscreen_item.id().clone();
-        let fill_screen_id: MenuId = fill_screen_item.id().clone();
         let release_id: MenuId = release_item.id().clone();
         let virtual_mon_id: MenuId = virtual_monitor_item.id().clone();
         let install_vdd_id: MenuId = install_vdd_item.id().clone();
+        let startup_id: MenuId = startup_item.id().clone();
+        let update_id: MenuId = update_item.id().clone();
         let reload_id: MenuId = reload_item.id().clone();
         let exit_id: MenuId = exit_item.id().clone();
 
@@ -149,14 +155,16 @@ impl TrayController {
                 Some(TrayAction::ToggleDisplay)
             } else if event.id == fullscreen_id {
                 Some(TrayAction::ToggleFullscreen)
-            } else if event.id == fill_screen_id {
-                Some(TrayAction::ToggleFillScreen)
             } else if event.id == virtual_mon_id {
                 Some(TrayAction::ToggleVirtualMonitor)
             } else if event.id == install_vdd_id {
                 Some(TrayAction::InstallVirtualDriver)
             } else if event.id == release_id {
                 Some(TrayAction::ReleaseAll)
+            } else if event.id == startup_id {
+                Some(TrayAction::ToggleRunOnStartup)
+            } else if event.id == update_id {
+                Some(TrayAction::CheckForUpdates)
             } else if event.id == reload_id {
                 Some(TrayAction::ReloadConfig)
             } else if event.id == exit_id {
@@ -176,15 +184,19 @@ impl TrayController {
             toggle_item,
             display_item,
             fullscreen_item,
-            fill_screen_item,
             release_item,
             virtual_monitor_item,
             install_vdd_item,
+            startup_item,
             show_latency,
             current_palette: palette,
         };
         controller.apply_status(initial_status, show_latency);
         Ok((controller, action_rx))
+    }
+
+    pub fn set_run_on_startup_checked(&self, enabled: bool) {
+        self.startup_item.set_checked(enabled);
     }
 
     pub fn apply_status(&mut self, status: &ServiceStatus, show_latency: bool) {
@@ -220,11 +232,6 @@ impl TrayController {
             .set_checked(is_sender_ok && status.display_visible && status.display_fullscreen);
         self.fullscreen_item
             .set_text(format_fullscreen_label(status));
-
-        self.fill_screen_item
-            .set_enabled(is_sender_ok && status.display_enabled);
-        self.fill_screen_item
-            .set_checked(is_sender_ok && status.display_enabled && status.display_fill_screen);
 
         self.virtual_monitor_item.set_enabled(
             is_receiver_ok && status.display_enabled && status.virtual_driver_installed,

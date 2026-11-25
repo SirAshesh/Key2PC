@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::config::{AppConfig, DisplayConfig, Role};
 use crate::display::{
     enumerate_monitors, inspect_virtual_driver_status, request_elevated_vdd_install,
-    select_best_monitor, VirtualMonitorGuard,
+    save_current_virtual_display_layout, select_best_monitor, VirtualMonitorGuard,
 };
 use crate::error::{Key2PcError, Result};
 use crate::input::{boost_current_thread_priority, DesktopBounds, InputSink, WinInputInjector};
@@ -102,7 +102,6 @@ impl ReceiverRuntime {
             display_enabled: config.display.enabled,
             display_visible: false,
             display_fullscreen: false,
-            display_fill_screen: false,
             display_hotkey_label: String::new(),
             display_fullscreen_hotkey_label: String::new(),
             virtual_driver_installed: drv_status.is_ready(),
@@ -199,7 +198,7 @@ impl ReceiverRuntime {
                 while rx_running.load(Ordering::Acquire) {
                     if let Some(new_bounds) = rx_bounds.lock().ok().and_then(|mut g| g.take()) {
                         sink.set_monitor_bounds(new_bounds);
-                        let snap = {
+                        let (snap, vmon_active) = {
                             let mut st = rx_status.lock().unwrap();
                             let prefix = if st.virtual_monitor_active {
                                 "Extended Virtual"
@@ -208,8 +207,11 @@ impl ReceiverRuntime {
                             };
                             st.capture_monitor_label =
                                 format!("{prefix} ({}x{})", new_bounds.width, new_bounds.height);
-                            st.clone()
+                            (st.clone(), st.virtual_monitor_active)
                         };
+                        if vmon_active {
+                            save_current_virtual_display_layout();
+                        }
                         rx_observer(&snap);
                     }
 
@@ -361,7 +363,6 @@ impl ManagedService for ReceiverRuntime {
     fn set_active(&self, _active: bool) {}
     fn toggle_display(&self) {}
     fn toggle_fullscreen(&self) {}
-    fn toggle_fill_screen(&self) {}
 
     fn toggle_virtual_monitor(&self) {
         if !self.display_cfg.enabled {

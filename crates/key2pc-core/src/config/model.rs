@@ -140,7 +140,6 @@ pub struct DisplayConfig {
     pub enabled: bool,
     pub virtual_monitor: bool,
     pub match_source_resolution: bool,
-    pub fill_screen: bool,
     pub video_port: u16,
     pub monitor: String,
     pub width: u32,
@@ -159,7 +158,6 @@ impl Default for DisplayConfig {
             enabled: true,
             virtual_monitor: true,
             match_source_resolution: true,
-            fill_screen: false,
             video_port: 24802,
             monitor: "auto".to_string(),
             width: 1920,
@@ -190,6 +188,24 @@ impl Default for TrayConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct UpdateConfig {
+    pub enabled: bool,
+    pub repo: String,
+    pub check_interval_minutes: u64,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            repo: "SirAshesh/Key2PC".to_string(),
+            check_interval_minutes: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct AppConfig {
     pub role: Role,
     pub device_name: String,
@@ -199,6 +215,7 @@ pub struct AppConfig {
     pub receiver: ReceiverConfig,
     pub display: DisplayConfig,
     pub tray: TrayConfig,
+    pub update: UpdateConfig,
 }
 
 impl Default for AppConfig {
@@ -212,6 +229,7 @@ impl Default for AppConfig {
             receiver: ReceiverConfig::default(),
             display: DisplayConfig::default(),
             tray: TrayConfig::default(),
+            update: UpdateConfig::default(),
         }
     }
 }
@@ -298,8 +316,34 @@ impl AppConfig {
         self.sender.release_all_hotkey.to_binding()?;
         self.sender.toggle_display_hotkey.to_binding()?;
         self.sender.toggle_fullscreen_hotkey.to_binding()?;
+        if self.update.enabled {
+            if !is_valid_github_repo(&self.update.repo) {
+                return Err(Key2PcError::InvalidConfig(format!(
+                    "update.repo must be 'owner/repo', got '{}'",
+                    self.update.repo
+                )));
+            }
+            if self.update.check_interval_minutes < 5 {
+                return Err(Key2PcError::InvalidConfig(
+                    "update.check_interval_minutes must be >= 5".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
+}
+
+fn is_valid_github_repo(repo: &str) -> bool {
+    let parts: Vec<&str> = repo.trim().split('/').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    parts.iter().all(|part| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    })
 }
 
 fn default_device_name() -> String {

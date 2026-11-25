@@ -1,0 +1,79 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package Name="Key2PC"
+             Manufacturer="Key2PC"
+             Version="$(var.Version)"
+             UpgradeCode="8B4E2A91-6C3D-4F18-9A72-5E1C8D4B3F20"
+             Scope="perUser"
+             Compressed="yes"
+             InstallerVersion="500">
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+                      AllowSameVersionUpgrades="yes" />
+
+        <MediaTemplate EmbedCab="yes" />
+
+        <Icon Id="Key2PcIcon" SourceFile="$(var.IconPath)" />
+        <Property Id="ARPPRODUCTICON" Value="Key2PcIcon" />
+
+        <Feature Id="MainFeature" Title="Key2PC" Level="1">
+            <ComponentRef Id="AppFiles" />
+            <ComponentRef Id="DefaultConfig" />
+            <ComponentRef Id="StartMenuShortcut" />
+        </Feature>
+
+        <StandardDirectory Id="LocalAppDataFolder">
+            <Directory Id="LocalProgramsFolder" Name="Programs">
+                <Directory Id="INSTALLFOLDER" Name="Key2PC" />
+            </Directory>
+        </StandardDirectory>
+
+        <StandardDirectory Id="ProgramMenuFolder">
+            <Directory Id="ApplicationProgramsFolder" Name="Key2PC" />
+        </StandardDirectory>
+    </Package>
+
+    <Fragment>
+        <Component Id="AppFiles" Directory="INSTALLFOLDER" Guid="C4A1D7E2-9B50-48A3-8E6F-2D1C4B7A9E10">
+            <File Id="Key2PcExe" Source="$(var.BinaryPath)" Name="key2pc.exe" />
+            <File Id="Key2PcReadme" Source="$(var.ReadmePath)" Name="README.md" />
+            <File Id="Key2PcLicense" Source="$(var.LicensePath)" Name="LICENSE" />
+            <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+            <RemoveFolder Id="RemoveLocalProgramsFolder" Directory="LocalProgramsFolder" On="uninstall" />
+            <RegistryKey Root="HKCU" Key="Software\Key2PC">
+                <RegistryValue Name="InstallMethod" Type="string" Value="msi" KeyPath="yes" />
+                <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" />
+                <RegistryValue Name="Version" Type="string" Value="$(var.Version)" />
+            </RegistryKey>
+        </Component>
+
+        <Component Id="DefaultConfig"
+                   Directory="INSTALLFOLDER"
+                   Guid="D8F3B2C1-4E7A-49D2-B5C6-1A8E3F7D0B24"
+                   Permanent="yes"
+                   NeverOverwrite="yes">
+            <File Id="Key2PcConfig" Source="$(var.ConfigPath)" Name="config.json" />
+            <RegistryValue Root="HKCU"
+                           Key="Software\Key2PC"
+                           Name="ConfigInstalled"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+        </Component>
+
+        <Component Id="StartMenuShortcut" Directory="ApplicationProgramsFolder" Guid="E7A9C3B4-5D12-4A88-9F01-3B6C8E2D4A55">
+            <Shortcut Id="ApplicationStartMenuShortcut"
+                      Name="Key2PC"
+                      Description="Key2PC Wireless Keyboard, Mouse and Second Screen"
+                      Target="[INSTALLFOLDER]key2pc.exe"
+                      WorkingDirectory="INSTALLFOLDER"
+                      Icon="Key2PcIcon" />
+            <RemoveFolder Id="RemoveStartMenuFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+            <RegistryValue Root="HKCU"
+                           Key="Software\Key2PC"
+                           Name="StartMenuShortcut"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+        </Component>
+    </Fragment>
+</Wix>

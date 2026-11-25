@@ -154,9 +154,10 @@ pub use viewer::{DisplayViewer, ViewerCommand, ViewerEvent, ViewerOptions};
 #[cfg(target_os = "windows")]
 pub use virtual_display::{
     inspect_virtual_driver_status, request_elevated_vdd_install, run_vdd_installer_cli,
-    VirtualMonitorGuard,
+    save_current_virtual_display_layout, VirtualMonitorGuard,
 };
 pub use virtual_display::{
-    is_virtual_display_signature, select_best_display_mode_index, VirtualDriverBackend,
-    VirtualDriverStatus,
+    compute_restored_monitor_placements, is_virtual_display_signature,
+    select_best_display_mode_index, LiveMonitorRect, PlannedMonitorChange, SavedDisplayLayout,
+    SavedMonitorEntry, VirtualDriverBackend, VirtualDriverStatus,
 };

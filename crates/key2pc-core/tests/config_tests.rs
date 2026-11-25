@@ -33,6 +33,36 @@ fn rejects_invalid_network_and_display_settings() {
     let mut cfg5 = AppConfig::default();
     cfg5.display.monitor = "invalid".to_string();
     assert!(cfg5.validate().is_err());
+
+    let mut cfg6 = AppConfig::default();
+    cfg6.update.repo = "invalid-repo".to_string();
+    assert!(cfg6.validate().is_err());
+
+    let mut cfg7 = AppConfig::default();
+    cfg7.update.check_interval_minutes = 1;
+    assert!(cfg7.validate().is_err());
+
+    let mut cfg8 = AppConfig::default();
+    cfg8.update.enabled = false;
+    cfg8.update.repo = "ignored".to_string();
+    cfg8.update.check_interval_minutes = 0;
+    assert!(cfg8.validate().is_ok());
+}
+
+#[test]
+fn ignores_legacy_fill_screen_field_and_defaults_update_config() {
+    let legacy_json = r#"{
+        "role": "sender",
+        "display": {
+            "enabled": true,
+            "fill_screen": false
+        }
+    }"#;
+    let cfg: AppConfig = serde_json::from_str(legacy_json).unwrap();
+    assert!(cfg.validate().is_ok());
+    assert!(cfg.update.enabled);
+    assert_eq!(cfg.update.repo, "SirAshesh/Key2PC");
+    assert_eq!(cfg.update.check_interval_minutes, 60);
 }
 
 #[test]

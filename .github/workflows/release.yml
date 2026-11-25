@@ -24,6 +24,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install WiX Toolset CLI
+        run: dotnet tool install --global wix --version 5.0.2
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -39,6 +47,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target\release\key2pc.exe dist\key2pc.exe
           Compress-Archive -Path target\release\key2pc.exe, config.json, README.md, LICENSE -DestinationPath dist\key2pc-windows-x86_64.zip -Force
+          & .\scripts\build-msi.ps1 -SkipCargoBuild
 
       - name: Determine release tag
         id: meta
@@ -65,9 +74,9 @@ jobs:
           $tag = "${{ steps.meta.outputs.tag }}"
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag dist\key2pc.exe dist\key2pc-windows-x86_64.zip --clobber
+            gh release upload $tag dist\key2pc.exe dist\key2pc-windows-x86_64.zip dist\key2pc-windows-x86_64.msi --clobber
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
-            gh release create $tag dist\key2pc.exe dist\key2pc-windows-x86_64.zip --title "Key2PC $tag" --target "${{ github.sha }}" --generate-notes
+            gh release create $tag dist\key2pc.exe dist\key2pc-windows-x86_64.zip dist\key2pc-windows-x86_64.msi --title "Key2PC $tag" --target "${{ github.sha }}" --generate-notes
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }

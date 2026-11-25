@@ -18,6 +18,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install WiX Toolset CLI
+        run: dotnet tool install --global wix --version 5.0.2
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -26,3 +34,7 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --workspace
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: .\scripts\build-msi.ps1 -SkipCargoBuild

@@ -8,15 +8,16 @@ Key2PC turns your Windows laptop into a low-latency wireless keyboard, mouse, an
 - Fast ACK retransmission and automatic release protection to prevent dropped or stuck keys
 - Hardware-accelerated 60fps display streaming using DXGI Desktop Duplication, Direct3D 11, and Media Foundation H.264 with live Windows cursor compositing
 - Automatic native source aspect matching (such as `1920x1200` 16:10 or `1920x1080` 16:9) without unexpected letterboxing
-- Built-in virtual monitor integration on the PC (supports Parsec Virtual Display Adapter and Virtual Display Driver) to extend your desktop onto your laptop without needing a physical second screen
+- Built-in virtual monitor integration on the PC (supports Parsec Virtual Display Adapter and Virtual Display Driver) to extend your desktop onto your laptop without needing a physical second screen, remembering your exact multi-monitor arrangement across reconnects
 - One-click Virtual Monitor Driver installer (`--install-vdd` or tray menu) with Windows UAC verification
-- Flexible fullscreen (`F11`, `Alt+Enter`, `Ctrl+Alt+F`) and zero-bars fill scaling (`F10`, tray menu, or `display.fill_screen`) on the laptop viewer
-- Background Windows system tray icon with live connection status, RTT latency, monitor mode, and config reload
+- Fullscreen (`F11`, `Alt+Enter`, `Ctrl+Alt+F`) and automatic edge-to-edge fill scaling on the laptop viewer
+- Windows `.msi` installer (`key2pc-windows-x86_64.msi`) and automatic background updates from GitHub Releases
+- Background Windows system tray icon with live connection status, RTT latency, monitor mode, **Start with Windows** toggle, update check, and config reload
 
 ## Quick Start
 
-1. Download `key2pc.exe` (or `key2pc-windows-x86_64.zip`) from the Releases page, or build from source.
-2. Put `key2pc.exe` and `config.json` in the same folder on both your PC and your laptop.
+1. Install Key2PC using `key2pc-windows-x86_64.msi` (or download portable `key2pc.exe` / `key2pc-windows-x86_64.zip`) from the Releases page, or build from source.
+2. Put `key2pc.exe` and `config.json` in the same folder on both your PC and your laptop (the `.msi` installer places them in `%LOCALAPPDATA%\Programs\Key2PC`).
 3. On your PC, set `"role": "receiver"` in `config.json` and launch `key2pc.exe`. Allow access through Windows Defender Firewall when prompted.
 4. On your laptop, keep `"role": "sender"` and `"target_host": "auto"` (or enter your PC's local IP address), then launch `key2pc.exe`.
 5. Make sure `"shared_secret"` under `"network"` matches on both devices.
@@ -25,7 +26,7 @@ Key2PC turns your Windows laptop into a low-latency wireless keyboard, mouse, an
 
 1. Launch `key2pc.exe` on your PC with `"role": "receiver"`.
 2. Right-click or click the Key2PC tray icon on your PC and choose **Install Virtual Monitor Driver (UAC)...** (or run `key2pc.exe --install-vdd`). Approve the Windows UAC prompt to install the signed virtual display driver once.
-3. With `"display.virtual_monitor": true`, Key2PC automatically attaches a virtual second monitor (`1920x1080 @ 60Hz` by default), switches Windows into Extend mode, and streams that second monitor to your laptop.
+3. With `"display.virtual_monitor": true`, Key2PC automatically attaches a virtual second monitor (`1920x1080 @ 60Hz` by default), switches Windows into Extend mode, and streams that second monitor to your laptop. If you arrange the virtual monitor in Windows Display Settings (e.g. left, middle, above, below, or right of existing monitors), Key2PC saves and restores that position across disconnects and reconnects.
 4. Use **PC Virtual Extended Monitor** in the PC tray menu anytime to switch between Extend mode and Mirror mode without restarting. The temporary virtual monitor is automatically unplugged when Key2PC exits.
 
 ## Controls
@@ -33,7 +34,6 @@ Key2PC turns your Windows laptop into a low-latency wireless keyboard, mouse, an
 - `Ctrl+Alt+K`: Toggle keyboard forwarding between your laptop and PC
 - `Ctrl+Alt+D`: Show or hide the Second Screen viewer window
 - `Ctrl+Alt+F`, `F11`, or `Alt+Enter`: Toggle borderless fullscreen on the Second Screen viewer window (also selectable from the tray menu)
-- `F10`: Toggle `Fill Screen Without Bars` stretch mode on the Second Screen viewer window (also selectable from the tray menu)
 - `Ctrl+Alt+Esc`: Release all held keys and mouse buttons on the PC
 - Clicking the viewer window automatically focuses keyboard and mouse input onto the PC when `"auto_forward_on_viewer_focus"` is `true`
 
@@ -56,13 +56,15 @@ Key2PC turns your Windows laptop into a low-latency wireless keyboard, mouse, an
 | `display.fps` | Target frame rate | `60` |
 | `display.bitrate_kbps` | Target H.264 bitrate in kbps | `16000` |
 | `display.fullscreen` | Open viewer directly in fullscreen | `false` |
-| `display.fill_screen` | Stretch video to fill the entire viewer window without black bars | `false` |
 | `display.open_viewer_on_start` | Open the viewer window automatically on laptop launch | `true` |
 | `display.capture_mouse` | Forward mouse moves, clicks, and scroll wheel from viewer | `true` |
 | `display.auto_forward_on_viewer_focus` | Automatically forward keyboard when viewer window has focus | `true` |
 | `sender.start_active` | Start keyboard forwarding immediately on launch | `false` |
 | `receiver.allow_only_ip` | Optional laptop IP filter (`null` allows any authenticated peer) | `null` |
 | `receiver.prefer_scancode` | Send hardware scan-code flags for games | `false` |
+| `update.enabled` | Automatically check GitHub Releases and self-update | `true` |
+| `update.repo` | GitHub `owner/repo` to check for releases | `"SirAshesh/Key2PC"` |
+| `update.check_interval_minutes` | Background update check interval in minutes (minimum `5`) | `60` |
 
 ## Building from Source
 

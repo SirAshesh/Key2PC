@@ -1,7 +1,306 @@
+use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtualDriverBackend {
     ParsecVdd,
     MttVdd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedMonitorEntry {
+    pub monitor_id: String,
+    pub device_name: String,
+    pub is_virtual: bool,
+    pub is_primary: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SavedDisplayLayout {
+    pub monitors: Vec<SavedMonitorEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveMonitorRect {
+    pub device_name: String,
+    pub monitor_id: String,
+    pub is_virtual: bool,
+    pub is_primary: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedMonitorChange {
+    pub device_name: String,
+    pub x: i32,
+    pub y: i32,
+    pub mode: Option<(u32, u32, u32)>,
+}
+
+fn rects_overlap(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> bool {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    let ar = ax.saturating_add(aw as i32);
+    let ab = ay.saturating_add(ah as i32);
+    let br = bx.saturating_add(bw as i32);
+    let bb = by.saturating_add(bh as i32);
+    ax < br && ar > bx && ay < bb && ab > by
+}
+
+fn rects_touch(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> bool {
+    if rects_overlap(a, b) {
+        return false;
+    }
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    let ar = ax.saturating_add(aw as i32);
+    let ab = ay.saturating_add(ah as i32);
+    let br = bx.saturating_add(bw as i32);
+    let bb = by.saturating_add(bh as i32);
+    let touch_x = (ar == bx || br == ax) && ay < bb && ab > by;
+    let touch_y = (ab == by || bb == ay) && ax < br && ar > bx;
+    touch_x || touch_y
+}
+
+fn match_physical_monitors<'a>(
+    live_physical: &[&'a LiveMonitorRect],
+    saved_physical: &[&'a SavedMonitorEntry],
+) -> Vec<(&'a LiveMonitorRect, &'a SavedMonitorEntry)> {
+    let mut used = vec![false; saved_physical.len()];
+    let mut matched = Vec::with_capacity(live_physical.len());
+
+    for &lp in live_physical {
+        let found = if !lp.monitor_id.is_empty() {
+            saved_physical.iter().enumerate().position(|(i, sp)| {
+                !used[i]
+                    && !sp.monitor_id.is_empty()
+                    && lp.monitor_id.eq_ignore_ascii_case(&sp.monitor_id)
+            })
+        } else {
+            None
+        }
+        .or_else(|| {
+            saved_physical
+                .iter()
+                .enumerate()
+                .position(|(i, sp)| !used[i] && lp.is_primary && sp.is_primary)
+        })
+        .or_else(|| {
+            saved_physical.iter().enumerate().position(|(i, sp)| {
+                !used[i] && lp.device_name.eq_ignore_ascii_case(&sp.device_name)
+            })
+        });
+
+        if let Some(idx) = found {
+            used[idx] = true;
+            matched.push((lp, saved_physical[idx]));
+        }
+    }
+    matched
+}
+
+fn place_adjacent_on_preferred_side(
+    live_physical: &[&LiveMonitorRect],
+    pref_x: i32,
+    pref_y: i32,
+    vw: u32,
+    vh: u32,
+) -> (i32, i32) {
+    if live_physical.is_empty() {
+        return (0, 0);
+    }
+    let primary = live_physical
+        .iter()
+        .copied()
+        .find(|m| m.is_primary)
+        .unwrap_or(live_physical[0]);
+
+    let min_x_mon = live_physical.iter().min_by_key(|m| m.x).unwrap();
+    let max_x_mon = live_physical
+        .iter()
+        .max_by_key(|m| m.x.saturating_add(m.width as i32))
+        .unwrap();
+    let min_y_mon = live_physical.iter().min_by_key(|m| m.y).unwrap();
+    let max_y_mon = live_physical
+        .iter()
+        .max_by_key(|m| m.y.saturating_add(m.height as i32))
+        .unwrap();
+
+    let pcx = primary.x + (primary.width as i32) / 2;
+    let pcy = primary.y + (primary.height as i32) / 2;
+    let vcx = pref_x + (vw as i32) / 2;
+    let vcy = pref_y + (vh as i32) / 2;
+    let dx = vcx - pcx;
+    let dy = vcy - pcy;
+
+    if dx.abs() >= dy.abs() {
+        if dx < 0 {
+            (min_x_mon.x - vw as i32, min_x_mon.y)
+        } else {
+            (max_x_mon.x + max_x_mon.width as i32, max_x_mon.y)
+        }
+    } else if dy < 0 {
+        (min_y_mon.x, min_y_mon.y - vh as i32)
+    } else {
+        (max_y_mon.x, max_y_mon.y + max_y_mon.height as i32)
+    }
+}
+
+/// Computes minimal atomic display changes to restore the user's saved monitor layout
+/// without overlapping existing physical monitors or unnecessarily moving unaffected monitors.
+pub fn compute_restored_monitor_placements(
+    live: &[LiveMonitorRect],
+    saved: Option<&SavedDisplayLayout>,
+    virtual_dev_name: &str,
+    chosen_mode: (u32, u32, u32),
+) -> Vec<PlannedMonitorChange> {
+    let Some(live_virtual) = live
+        .iter()
+        .find(|m| m.device_name.eq_ignore_ascii_case(virtual_dev_name))
+        .or_else(|| live.iter().find(|m| m.is_virtual))
+    else {
+        return Vec::new();
+    };
+
+    let live_physical: Vec<&LiveMonitorRect> = live
+        .iter()
+        .filter(|m| {
+            !m.device_name
+                .eq_ignore_ascii_case(&live_virtual.device_name)
+        })
+        .collect();
+
+    let v_mode_opt = if (live_virtual.width, live_virtual.height, live_virtual.fps) != chosen_mode {
+        Some(chosen_mode)
+    } else {
+        None
+    };
+
+    if let Some(layout) = saved {
+        if let Some(saved_virtual) = layout.monitors.iter().find(|m| m.is_virtual) {
+            let saved_physical: Vec<&SavedMonitorEntry> =
+                layout.monitors.iter().filter(|m| !m.is_virtual).collect();
+            let matched = match_physical_monitors(&live_physical, &saved_physical);
+
+            let live_primary = live.iter().find(|m| m.is_primary);
+            let (dx, dy) = if let Some(lp) = live_primary {
+                if let Some((_, sp)) = matched
+                    .iter()
+                    .find(|(m, _)| m.device_name.eq_ignore_ascii_case(&lp.device_name))
+                {
+                    (lp.x - sp.x, lp.y - sp.y)
+                } else if let Some(sp) = layout.monitors.iter().find(|m| m.is_primary) {
+                    (lp.x - sp.x, lp.y - sp.y)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (0, 0)
+            };
+
+            let target_vx = saved_virtual.x.saturating_add(dx);
+            let target_vy = saved_virtual.y.saturating_add(dy);
+
+            if !live_physical.is_empty() && matched.len() == live_physical.len() {
+                let mut changes = Vec::new();
+                for (lp, sp) in &matched {
+                    let tx = sp.x.saturating_add(dx);
+                    let ty = sp.y.saturating_add(dy);
+                    if tx != lp.x || ty != lp.y {
+                        changes.push(PlannedMonitorChange {
+                            device_name: lp.device_name.clone(),
+                            x: tx,
+                            y: ty,
+                            mode: None,
+                        });
+                    }
+                }
+                if target_vx != live_virtual.x
+                    || target_vy != live_virtual.y
+                    || v_mode_opt.is_some()
+                {
+                    changes.push(PlannedMonitorChange {
+                        device_name: live_virtual.device_name.clone(),
+                        x: target_vx,
+                        y: target_vy,
+                        mode: v_mode_opt,
+                    });
+                }
+                return changes;
+            }
+
+            let (vw, vh, _) = chosen_mode;
+            let overlaps = live_physical.iter().any(|lp| {
+                rects_overlap(
+                    (target_vx, target_vy, vw, vh),
+                    (lp.x, lp.y, lp.width, lp.height),
+                )
+            });
+            let touches = live_physical.is_empty()
+                || live_physical.iter().any(|lp| {
+                    rects_touch(
+                        (target_vx, target_vy, vw, vh),
+                        (lp.x, lp.y, lp.width, lp.height),
+                    )
+                });
+
+            let (final_vx, final_vy) = if !overlaps && touches {
+                (target_vx, target_vy)
+            } else {
+                place_adjacent_on_preferred_side(&live_physical, target_vx, target_vy, vw, vh)
+            };
+
+            if final_vx != live_virtual.x || final_vy != live_virtual.y || v_mode_opt.is_some() {
+                return vec![PlannedMonitorChange {
+                    device_name: live_virtual.device_name.clone(),
+                    x: final_vx,
+                    y: final_vy,
+                    mode: v_mode_opt,
+                }];
+            }
+            return Vec::new();
+        }
+    }
+
+    let (vw, vh, _) = chosen_mode;
+    let overlaps_existing = live_physical.iter().any(|lp| {
+        rects_overlap(
+            (live_virtual.x, live_virtual.y, vw, vh),
+            (lp.x, lp.y, lp.width, lp.height),
+        )
+    });
+
+    if !overlaps_existing {
+        if v_mode_opt.is_some() {
+            return vec![PlannedMonitorChange {
+                device_name: live_virtual.device_name.clone(),
+                x: live_virtual.x,
+                y: live_virtual.y,
+                mode: v_mode_opt,
+            }];
+        }
+        return Vec::new();
+    }
+
+    let max_right_edge = live_physical
+        .iter()
+        .map(|m| m.x.saturating_add(m.width as i32))
+        .max()
+        .unwrap_or(0);
+    vec![PlannedMonitorChange {
+        device_name: live_virtual.device_name.clone(),
+        x: max_right_edge,
+        y: 0,
+        mode: v_mode_opt,
+    }]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,8 +438,9 @@ mod win {
     };
 
     use crate::display::virtual_display::{
-        is_virtual_display_signature, select_best_display_mode_index, VirtualDriverBackend,
-        VirtualDriverStatus,
+        compute_restored_monitor_placements, is_virtual_display_signature,
+        select_best_display_mode_index, LiveMonitorRect, SavedDisplayLayout, SavedMonitorEntry,
+        VirtualDriverBackend, VirtualDriverStatus,
     };
     use crate::display::{utf16_z_to_string, EDD_GET_DEVICE_INTERFACE_NAME};
     use crate::error::{Key2PcError, Result};
@@ -183,6 +483,7 @@ mod win {
     #[derive(Debug, Clone)]
     struct EnumeratedGdiDisplay {
         device_name: String,
+        monitor_id: String,
         is_primary: bool,
         is_attached: bool,
         is_virtual: bool,
@@ -238,17 +539,33 @@ mod win {
             let _ = parsec_vdd_ioctl(raw_handle.0, VDD_IOCTL_UPDATE, &[]);
 
             let keepalive_running = Arc::new(AtomicBool::new(true));
+            let layout_ready = Arc::new(AtomicBool::new(false));
             let keepalive_stop = Arc::new((Mutex::new(false), Condvar::new()));
             let thread_handle_ref = Arc::clone(&raw_handle);
             let thread_running = Arc::clone(&keepalive_running);
+            let thread_layout_ready = Arc::clone(&layout_ready);
             let thread_stop = Arc::clone(&keepalive_stop);
 
             let keepalive_handle = thread::Builder::new()
                 .name("key2pc-vdd-ping".to_string())
                 .spawn(move || {
                     let (lock, cvar) = &*thread_stop;
+                    let mut ticks = 0u32;
+                    let mut last_saved: Option<SavedDisplayLayout> = None;
                     while thread_running.load(Ordering::Acquire) {
                         let _ = parsec_vdd_ioctl(thread_handle_ref.0, VDD_IOCTL_UPDATE, &[]);
+                        ticks = ticks.wrapping_add(1);
+                        if thread_layout_ready.load(Ordering::Acquire)
+                            && ticks >= 20
+                            && ticks.is_multiple_of(20)
+                        {
+                            if let Some(current) = snapshot_virtual_display_layout() {
+                                if last_saved.as_ref() != Some(&current) {
+                                    save_display_layout(&current);
+                                    last_saved = Some(current);
+                                }
+                            }
+                        }
                         let guard = lock.lock().unwrap();
                         if *guard {
                             break;
@@ -275,6 +592,7 @@ mod win {
                 fps,
                 Duration::from_millis(2500),
             );
+            layout_ready.store(true, Ordering::Release);
             Ok(guard)
         }
 
@@ -309,6 +627,10 @@ mod win {
         }
 
         pub fn shutdown(&mut self) {
+            if self.device_name.is_some() {
+                save_current_virtual_display_layout();
+                self.device_name = None;
+            }
             self.keepalive_running.store(false, Ordering::Release);
             {
                 let (lock, cvar) = &*self.keepalive_stop;
@@ -827,6 +1149,12 @@ mod win {
 
         let dev_name = target_dev?;
         let _ = apply_extend_topology_and_mode(&dev_name, width, height, fps);
+
+        if load_saved_display_layout().is_some() {
+            thread::sleep(Duration::from_millis(350));
+            let _ = apply_extend_topology_and_mode(&dev_name, width, height, fps);
+        }
+
         Some(dev_name)
     }
 
@@ -885,12 +1213,94 @@ mod win {
 
             out.push(EnumeratedGdiDisplay {
                 device_name: adapter_name,
+                monitor_id: monitor_id.to_ascii_lowercase(),
                 is_primary,
                 is_attached,
                 is_virtual,
             });
         }
         out
+    }
+
+    fn display_layout_path() -> PathBuf {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            let trimmed = local_app_data.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed)
+                    .join("Key2PC")
+                    .join("display_layout.json");
+            }
+        }
+        std::env::temp_dir().join("key2pc-display-layout.json")
+    }
+
+    fn load_saved_display_layout() -> Option<SavedDisplayLayout> {
+        let path = display_layout_path();
+        let raw = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<SavedDisplayLayout>(&raw).ok()
+    }
+
+    fn save_display_layout(layout: &SavedDisplayLayout) {
+        let path = display_layout_path();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        if let Ok(json) = serde_json::to_string_pretty(layout) {
+            let _ = std::fs::write(path, format!("{json}\n"));
+        }
+    }
+
+    fn capture_live_attached_monitors() -> Vec<LiveMonitorRect> {
+        enumerate_gdi_displays()
+            .into_iter()
+            .filter(|d| d.is_attached)
+            .filter_map(|d| {
+                let dm = read_current_devmode(&d.device_name)?;
+                let pos = unsafe { dm.Anonymous1.Anonymous2.dmPosition };
+                Some(LiveMonitorRect {
+                    device_name: d.device_name,
+                    monitor_id: d.monitor_id,
+                    is_virtual: d.is_virtual,
+                    is_primary: d.is_primary,
+                    x: pos.x,
+                    y: pos.y,
+                    width: dm.dmPelsWidth,
+                    height: dm.dmPelsHeight,
+                    fps: dm.dmDisplayFrequency,
+                })
+            })
+            .collect()
+    }
+
+    fn snapshot_virtual_display_layout() -> Option<SavedDisplayLayout> {
+        let live = capture_live_attached_monitors();
+        if !live.iter().any(|m| m.is_virtual) {
+            return None;
+        }
+        Some(SavedDisplayLayout {
+            monitors: live
+                .into_iter()
+                .map(|m| SavedMonitorEntry {
+                    monitor_id: m.monitor_id,
+                    device_name: m.device_name,
+                    is_virtual: m.is_virtual,
+                    is_primary: m.is_primary,
+                    x: m.x,
+                    y: m.y,
+                    width: m.width,
+                    height: m.height,
+                    fps: m.fps,
+                })
+                .collect(),
+        })
+    }
+
+    pub fn save_current_virtual_display_layout() {
+        if let Some(layout) = snapshot_virtual_display_layout() {
+            save_display_layout(&layout);
+        }
     }
 
     fn apply_extend_topology_and_mode(
@@ -918,15 +1328,17 @@ mod win {
                     "SetDisplayConfig extend topology failed with code {rc}"
                 )));
             }
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(250));
         }
 
-        let primary_right_edge = displays
-            .iter()
-            .find(|d| d.is_primary)
-            .and_then(|d| read_current_devmode(&d.device_name))
-            .map(|dm| unsafe { dm.Anonymous1.Anonymous2.dmPosition.x + dm.dmPelsWidth as i32 })
-            .unwrap_or(1920);
+        let live = capture_live_attached_monitors();
+        let saved = load_saved_display_layout();
+        let (pref_w, pref_h, pref_fps) = saved
+            .as_ref()
+            .and_then(|layout| layout.monitors.iter().find(|m| m.is_virtual))
+            .filter(|m| m.width >= 320 && m.height >= 240)
+            .map(|m| (m.width, m.height, m.fps.max(15)))
+            .unwrap_or((target_w, target_h, target_fps));
 
         let dev_w: Vec<u16> = virtual_dev_name
             .encode_utf16()
@@ -941,52 +1353,88 @@ mod win {
             .iter()
             .map(|m| (m.dmPelsWidth, m.dmPelsHeight, m.dmDisplayFrequency))
             .collect();
-        let Some(mode_idx) =
-            select_best_display_mode_index(&tuples, target_w, target_h, target_fps)
+        let Some(mode_idx) = select_best_display_mode_index(&tuples, pref_w, pref_h, pref_fps)
         else {
             return Ok(());
         };
-        let mut chosen = all_modes[mode_idx];
+        let chosen = all_modes[mode_idx];
+        let chosen_tuple = (
+            chosen.dmPelsWidth,
+            chosen.dmPelsHeight,
+            chosen.dmDisplayFrequency,
+        );
 
-        let current = read_current_devmode(virtual_dev_name);
-        let already_matches = current.is_some_and(|cur| unsafe {
-            cur.dmPelsWidth == chosen.dmPelsWidth
-                && cur.dmPelsHeight == chosen.dmPelsHeight
-                && cur.dmDisplayFrequency == chosen.dmDisplayFrequency
-                && cur.Anonymous1.Anonymous2.dmPosition.x != 0
-        });
-        if already_matches {
+        let planned = compute_restored_monitor_placements(
+            &live,
+            saved.as_ref(),
+            virtual_dev_name,
+            chosen_tuple,
+        );
+        if planned.is_empty() {
             return Ok(());
         }
 
-        chosen.dmFields |= DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
-        chosen.Anonymous1.Anonymous2.dmPosition = POINTL {
-            x: primary_right_edge,
-            y: 0,
-        };
+        let mut staged_any = false;
+        for change in planned {
+            let is_virtual_target = change.device_name.eq_ignore_ascii_case(virtual_dev_name);
+            let mut dm = if change.mode.is_some() && is_virtual_target {
+                chosen
+            } else if let Some(cur) = read_current_devmode(&change.device_name) {
+                cur
+            } else if is_virtual_target {
+                chosen
+            } else {
+                continue;
+            };
 
-        let rc = unsafe {
-            ChangeDisplaySettingsExW(
-                PCWSTR(dev_w.as_ptr()),
-                Some(&chosen),
-                None,
-                CDS_UPDATEREGISTRY | CDS_NORESET,
-                None,
-            )
-        };
-        if rc != DISP_CHANGE_SUCCESSFUL {
-            return Err(Key2PcError::Display(format!(
-                "ChangeDisplaySettingsExW failed with code {}",
-                rc.0
-            )));
+            dm.dmFields |= DM_POSITION;
+            dm.Anonymous1.Anonymous2.dmPosition = POINTL {
+                x: change.x,
+                y: change.y,
+            };
+            if let Some((mw, mh, mfps)) = change.mode {
+                dm.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+                dm.dmPelsWidth = mw;
+                dm.dmPelsHeight = mh;
+                dm.dmDisplayFrequency = mfps;
+            }
+
+            let target_wstr: Vec<u16> = change
+                .device_name
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let rc = unsafe {
+                ChangeDisplaySettingsExW(
+                    PCWSTR(target_wstr.as_ptr()),
+                    Some(&dm),
+                    None,
+                    CDS_UPDATEREGISTRY | CDS_NORESET,
+                    None,
+                )
+            };
+            if rc != DISP_CHANGE_SUCCESSFUL {
+                let _ = unsafe {
+                    ChangeDisplaySettingsExW(PCWSTR::null(), None, None, Default::default(), None)
+                };
+                return Err(Key2PcError::Display(format!(
+                    "ChangeDisplaySettingsExW failed for {} with code {}",
+                    change.device_name, rc.0
+                )));
+            }
+            staged_any = true;
         }
-        let commit_rc = unsafe {
-            ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_UPDATEREGISTRY, None)
-        };
-        if commit_rc != DISP_CHANGE_SUCCESSFUL {
-            let _ = unsafe {
+
+        if staged_any {
+            let commit_rc = unsafe {
                 ChangeDisplaySettingsExW(PCWSTR::null(), None, None, Default::default(), None)
             };
+            if commit_rc != DISP_CHANGE_SUCCESSFUL {
+                return Err(Key2PcError::Display(format!(
+                    "ChangeDisplaySettingsExW commit failed with code {}",
+                    commit_rc.0
+                )));
+            }
         }
         Ok(())
     }
@@ -1038,5 +1486,5 @@ mod win {
 #[cfg(target_os = "windows")]
 pub use win::{
     inspect_virtual_driver_status, request_elevated_vdd_install, run_vdd_installer_cli,
-    VirtualMonitorGuard,
+    save_current_virtual_display_layout, VirtualMonitorGuard,
 };

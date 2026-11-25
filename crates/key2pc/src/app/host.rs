@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use key2pc_core::{
     start_configured_service, write_error_log, AppConfig, JsonFileConfigStore, ManagedService,
-    Role, ServiceStatus, StatusObserver,
+    Role, ServiceStatus, StatusObserver, UpdateConfig,
 };
 
 pub struct AppHost {
@@ -11,6 +11,7 @@ pub struct AppHost {
     service: Option<Box<dyn ManagedService>>,
     show_latency: bool,
     log_file: Option<String>,
+    update_config: UpdateConfig,
     observer: StatusObserver,
 }
 
@@ -34,6 +35,7 @@ impl AppHost {
             service: None,
             show_latency: true,
             log_file: None,
+            update_config: UpdateConfig::default(),
             observer,
         }
     }
@@ -62,6 +64,10 @@ impl AppHost {
         self.log_file.as_deref()
     }
 
+    pub fn update_config(&self) -> UpdateConfig {
+        self.update_config.clone()
+    }
+
     pub fn toggle_active(&self) {
         if let Some(svc) = &self.service {
             svc.toggle_active();
@@ -77,12 +83,6 @@ impl AppHost {
     pub fn toggle_fullscreen(&self) {
         if let Some(svc) = &self.service {
             svc.toggle_fullscreen();
-        }
-    }
-
-    pub fn toggle_fill_screen(&self) {
-        if let Some(svc) = &self.service {
-            svc.toggle_fill_screen();
         }
     }
 
@@ -115,6 +115,7 @@ impl AppHost {
     fn boot_with_config(&mut self, config: AppConfig) {
         self.show_latency = config.tray.show_tooltip_latency;
         self.log_file = config.log_file.clone();
+        self.update_config = config.update.clone();
 
         match start_configured_service(&config, Arc::clone(&self.observer)) {
             Ok(service) => {

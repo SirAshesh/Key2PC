@@ -1,11 +1,13 @@
 use std::time::{Duration, Instant};
 
 use key2pc_core::display::{
-    composite_dxgi_pointer_over_bgra, compute_encode_dimensions, enumerate_monitors,
-    inspect_virtual_driver_status, is_virtual_display_signature, select_best_display_mode_index,
-    select_best_monitor, select_monitor_index, CaptureResult, DecodedFrame, DisplayViewer,
-    DxgiScreenCapturer, MfH264Decoder, MfH264Encoder, MonitorInfo, PointerShapeDesc,
-    ScreenCapturer, VideoDecoder, VideoEncoder, ViewerCommand, ViewerEvent, ViewerOptions,
+    composite_dxgi_pointer_over_bgra, compute_encode_dimensions,
+    compute_restored_monitor_placements, enumerate_monitors, inspect_virtual_driver_status,
+    is_virtual_display_signature, select_best_display_mode_index, select_best_monitor,
+    select_monitor_index, CaptureResult, DecodedFrame, DisplayViewer, DxgiScreenCapturer,
+    LiveMonitorRect, MfH264Decoder, MfH264Encoder, MonitorInfo, PlannedMonitorChange,
+    PointerShapeDesc, SavedDisplayLayout, SavedMonitorEntry, ScreenCapturer, VideoDecoder,
+    VideoEncoder, ViewerCommand, ViewerEvent, ViewerOptions,
 };
 use key2pc_core::input::DesktopBounds;
 use key2pc_core::protocol::{
@@ -157,7 +159,6 @@ fn viewer_initializes_renders_and_shuts_down_cleanly() {
         initial_height: 720,
         start_visible: false,
         start_fullscreen: false,
-        fill_screen: false,
         capture_mouse: true,
     })
     .unwrap();
@@ -183,17 +184,6 @@ fn viewer_initializes_renders_and_shuts_down_cleanly() {
     }
     assert!(saw_fullscreen);
     assert!(viewer.is_fullscreen());
-    viewer.send_command(ViewerCommand::ToggleFillScreen);
-    let mut saw_fill_screen = false;
-    for _ in 0..20 {
-        if let Ok(ViewerEvent::FillScreenChanged(true)) = rx.recv_timeout(Duration::from_millis(50))
-        {
-            saw_fill_screen = true;
-            break;
-        }
-    }
-    assert!(saw_fill_screen);
-    assert!(viewer.is_fill_screen());
     viewer.send_command(ViewerCommand::SetFullscreen(false));
     std::thread::sleep(Duration::from_millis(50));
     viewer.shutdown();
@@ -354,4 +344,240 @@ fn encodes_and_decodes_1920x1200_h264_frames() {
         }
     }
     assert!(decoded_count >= 1);
+}
+
+#[test]
+fn restores_saved_3_monitor_layout_for_left_middle_above_below_and_no_saved_fallback() {
+    let primary_id = "monitor\\del1000\\primary";
+    let second_id = "monitor\\aoc2000\\second";
+    let virtual_id = "monitor\\psccdd0\\virtual";
+
+    // Case 1: Saved virtual monitor on the far LEFT (-1920, 0), Windows reconnected it on the far RIGHT (4480, 0).
+    let saved_left = SavedDisplayLayout {
+        monitors: vec![
+            SavedMonitorEntry {
+                monitor_id: primary_id.to_string(),
+                device_name: "\\\\.\\DISPLAY1".to_string(),
+                is_virtual: false,
+                is_primary: true,
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                fps: 60,
+            },
+            SavedMonitorEntry {
+                monitor_id: second_id.to_string(),
+                device_name: "\\\\.\\DISPLAY2".to_string(),
+                is_virtual: false,
+                is_primary: false,
+                x: 1920,
+                y: 0,
+                width: 2560,
+                height: 1440,
+                fps: 60,
+            },
+            SavedMonitorEntry {
+                monitor_id: virtual_id.to_string(),
+                device_name: "\\\\.\\DISPLAY3".to_string(),
+                is_virtual: true,
+                is_primary: false,
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1200,
+                fps: 60,
+            },
+        ],
+    };
+    let live_reconnected_right = vec![
+        LiveMonitorRect {
+            device_name: "\\\\.\\DISPLAY1".to_string(),
+            monitor_id: primary_id.to_string(),
+            is_virtual: false,
+            is_primary: true,
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+        },
+        LiveMonitorRect {
+            device_name: "\\\\.\\DISPLAY2".to_string(),
+            monitor_id: second_id.to_string(),
+            is_virtual: false,
+            is_primary: false,
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            fps: 60,
+        },
+        LiveMonitorRect {
+            device_name: "\\\\.\\DISPLAY4".to_string(),
+            monitor_id: virtual_id.to_string(),
+            is_virtual: true,
+            is_primary: false,
+            x: 4480,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+        },
+    ];
+    let plan_left = compute_restored_monitor_placements(
+        &live_reconnected_right,
+        Some(&saved_left),
+        "\\\\.\\DISPLAY4",
+        (1920, 1200, 60),
+    );
+    assert_eq!(
+        plan_left,
+        vec![PlannedMonitorChange {
+            device_name: "\\\\.\\DISPLAY4".to_string(),
+            x: -1920,
+            y: 0,
+            mode: Some((1920, 1200, 60)),
+        }]
+    );
+
+    // Case 2: Virtual monitor saved in the MIDDLE (1920, 0) between Primary (0, 0) and Second Monitor (3840, 0).
+    let saved_middle = SavedDisplayLayout {
+        monitors: vec![
+            saved_left.monitors[0].clone(),
+            SavedMonitorEntry {
+                x: 1920,
+                y: 0,
+                ..saved_left.monitors[2].clone()
+            },
+            SavedMonitorEntry {
+                x: 3840,
+                y: 0,
+                ..saved_left.monitors[1].clone()
+            },
+        ],
+    };
+    let plan_middle = compute_restored_monitor_placements(
+        &live_reconnected_right,
+        Some(&saved_middle),
+        "\\\\.\\DISPLAY4",
+        (1920, 1200, 60),
+    );
+    assert_eq!(
+        plan_middle,
+        vec![
+            PlannedMonitorChange {
+                device_name: "\\\\.\\DISPLAY2".to_string(),
+                x: 3840,
+                y: 0,
+                mode: None,
+            },
+            PlannedMonitorChange {
+                device_name: "\\\\.\\DISPLAY4".to_string(),
+                x: 1920,
+                y: 0,
+                mode: Some((1920, 1200, 60)),
+            },
+        ]
+    );
+
+    // Case 3: Virtual monitor saved ABOVE Primary (0, -1080) with x == 0.
+    let saved_above = SavedDisplayLayout {
+        monitors: vec![
+            saved_left.monitors[0].clone(),
+            saved_left.monitors[1].clone(),
+            SavedMonitorEntry {
+                x: 0,
+                y: -1080,
+                width: 1920,
+                height: 1080,
+                ..saved_left.monitors[2].clone()
+            },
+        ],
+    };
+    let plan_above = compute_restored_monitor_placements(
+        &live_reconnected_right,
+        Some(&saved_above),
+        "\\\\.\\DISPLAY4",
+        (1920, 1080, 60),
+    );
+    assert_eq!(
+        plan_above,
+        vec![PlannedMonitorChange {
+            device_name: "\\\\.\\DISPLAY4".to_string(),
+            x: 0,
+            y: -1080,
+            mode: None,
+        }]
+    );
+
+    // Case 4: Already at saved BELOW Primary (0, 1080) -> empty plan (no flicker).
+    let mut live_below = live_reconnected_right.clone();
+    live_below[2].x = 0;
+    live_below[2].y = 1080;
+    let saved_below = SavedDisplayLayout {
+        monitors: vec![
+            saved_left.monitors[0].clone(),
+            saved_left.monitors[1].clone(),
+            SavedMonitorEntry {
+                x: 0,
+                y: 1080,
+                width: 1920,
+                height: 1080,
+                ..saved_left.monitors[2].clone()
+            },
+        ],
+    };
+    let plan_below = compute_restored_monitor_placements(
+        &live_below,
+        Some(&saved_below),
+        "\\\\.\\DISPLAY4",
+        (1920, 1080, 60),
+    );
+    assert!(plan_below.is_empty());
+
+    // Case 5: No saved layout yet, Windows placed virtual at (-1920, 0) without overlap, mode change only -> keeps (-1920, 0).
+    let mut live_left = live_reconnected_right.clone();
+    live_left[2].x = -1920;
+    live_left[2].y = 0;
+    let plan_no_saved = compute_restored_monitor_placements(
+        &live_left,
+        None,
+        "\\\\.\\DISPLAY4",
+        (1920, 1200, 60),
+    );
+    assert_eq!(
+        plan_no_saved,
+        vec![PlannedMonitorChange {
+            device_name: "\\\\.\\DISPLAY4".to_string(),
+            x: -1920,
+            y: 0,
+            mode: Some((1920, 1200, 60)),
+        }]
+    );
+
+    // Case 6: No saved layout yet and virtual overlaps Monitor 2 at (1920, 0) -> places after max_right_edge (4480, 0), not primary_right_edge (1920).
+    let mut live_overlap = live_reconnected_right;
+    live_overlap[2].x = 1920;
+    live_overlap[2].y = 0;
+    let plan_overlap = compute_restored_monitor_placements(
+        &live_overlap,
+        None,
+        "\\\\.\\DISPLAY4",
+        (1920, 1080, 60),
+    );
+    assert_eq!(
+        plan_overlap,
+        vec![PlannedMonitorChange {
+            device_name: "\\\\.\\DISPLAY4".to_string(),
+            x: 4480,
+            y: 0,
+            mode: None,
+        }]
+    );
+
+    // Case 7: JSON roundtrip for SavedDisplayLayout.
+    let json = serde_json::to_string(&saved_left).unwrap();
+    let decoded: SavedDisplayLayout = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, saved_left);
 }

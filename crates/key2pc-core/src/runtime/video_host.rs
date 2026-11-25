@@ -388,7 +388,6 @@ impl VideoViewerHost {
         on_focus_active: Arc<dyn Fn(bool) + Send + Sync>,
         on_visibility_changed: Arc<dyn Fn(bool) + Send + Sync>,
         on_fullscreen_changed: Arc<dyn Fn(bool) + Send + Sync>,
-        on_fill_screen_changed: Arc<dyn Fn(bool) + Send + Sync>,
     ) -> Result<Self> {
         let bind_ip: IpAddr = config
             .network
@@ -409,7 +408,6 @@ impl VideoViewerHost {
             initial_height: config.display.height,
             start_visible: config.display.open_viewer_on_start,
             start_fullscreen: config.display.fullscreen,
-            fill_screen: config.display.fill_screen,
             capture_mouse: config.display.capture_mouse,
         })?;
         let viewer = Arc::new(viewer);
@@ -452,7 +450,6 @@ impl VideoViewerHost {
                     on_focus_active,
                     on_visibility_changed,
                     on_fullscreen_changed,
-                    on_fill_screen_changed,
                 );
             })?;
 
@@ -477,10 +474,6 @@ impl VideoViewerHost {
 
     pub fn toggle_fullscreen(&self) {
         self.viewer.send_command(ViewerCommand::ToggleFullscreen);
-    }
-
-    pub fn toggle_fill_screen(&self) {
-        self.viewer.send_command(ViewerCommand::ToggleFillScreen);
     }
 
     pub fn shutdown(&mut self) {
@@ -720,7 +713,6 @@ fn run_viewer_event_bridge(
     on_focus_active: Arc<dyn Fn(bool) + Send + Sync>,
     on_visibility_changed: Arc<dyn Fn(bool) + Send + Sync>,
     on_fullscreen_changed: Arc<dyn Fn(bool) + Send + Sync>,
-    on_fill_screen_changed: Arc<dyn Fn(bool) + Send + Sync>,
 ) {
     let mut control_buf = Vec::with_capacity(64);
     while running.load(Ordering::Acquire) {
@@ -735,9 +727,6 @@ fn run_viewer_event_bridge(
             }
             Ok(ViewerEvent::FullscreenChanged(fullscreen)) => {
                 on_fullscreen_changed(fullscreen);
-            }
-            Ok(ViewerEvent::FillScreenChanged(fill_screen)) => {
-                on_fill_screen_changed(fill_screen);
             }
             Ok(ViewerEvent::VisibilityChanged(visible)) => {
                 on_visibility_changed(visible);

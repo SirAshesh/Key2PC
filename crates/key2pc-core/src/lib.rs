@@ -5,11 +5,13 @@ pub mod input;
 pub mod network;
 pub mod protocol;
 pub mod runtime;
+pub mod startup;
 pub mod tray;
+pub mod updater;
 
 pub use config::{
     resolve_config_path, AppConfig, ConfigStore, DisplayConfig, HotkeyConfig, JsonFileConfigStore,
-    NetworkConfig, ReceiverConfig, Role, SenderConfig, TrayConfig,
+    NetworkConfig, ReceiverConfig, Role, SenderConfig, TrayConfig, UpdateConfig,
 };
 pub use display::{select_monitor_index, CaptureResult, DecodedFrame, EncodedFrame, MonitorInfo};
 pub use error::{Key2PcError, Result};

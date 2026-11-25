@@ -18,7 +18,6 @@ pub struct ServiceStatus {
     pub display_enabled: bool,
     pub display_visible: bool,
     pub display_fullscreen: bool,
-    pub display_fill_screen: bool,
     pub display_hotkey_label: String,
     pub display_fullscreen_hotkey_label: String,
     pub virtual_driver_installed: bool,
@@ -40,7 +39,6 @@ impl ServiceStatus {
             display_enabled: false,
             display_visible: false,
             display_fullscreen: false,
-            display_fill_screen: false,
             display_hotkey_label: String::new(),
             display_fullscreen_hotkey_label: String::new(),
             virtual_driver_installed: false,
@@ -56,7 +54,6 @@ pub trait ManagedService: Send {
     fn set_active(&self, active: bool);
     fn toggle_display(&self);
     fn toggle_fullscreen(&self);
-    fn toggle_fill_screen(&self);
     fn toggle_virtual_monitor(&self);
     fn install_virtual_driver(&self) -> Result<()>;
     fn release_all(&self);
